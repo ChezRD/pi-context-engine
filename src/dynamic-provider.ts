@@ -36,9 +36,16 @@ export function buildDynamicModels(ids: string[]): any[] {
 	}));
 }
 
+export const COMMAND_RESERVED_PROVIDER_NAMES = new Set(["deepseek-cache", "dscache", "deepseek_cache"]);
+
+export function effectiveDynamicProviderName(config: ExtensionConfig): string {
+	if (config.allowOverrideBuiltInDeepSeek) return "deepseek";
+	return COMMAND_RESERVED_PROVIDER_NAMES.has(config.dynamicProviderName) ? "deepseek-cache-provider" : config.dynamicProviderName;
+}
+
 export async function maybeRegisterDynamicProvider(pi: any, config: ExtensionConfig): Promise<string[]> {
 	if (!config.registerDynamicProvider) return [];
-	const providerName = config.allowOverrideBuiltInDeepSeek ? "deepseek" : config.dynamicProviderName;
+	const providerName = effectiveDynamicProviderName(config);
 	const fetched = await fetchDeepSeekModelIds(config);
 	const ids = fetched ?? FALLBACK_IDS;
 	pi.registerProvider?.(providerName, {

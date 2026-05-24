@@ -1,60 +1,90 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_CONFIG, getConfigPath, readConfig, writeConfig, type ExtensionConfig } from "./config.ts";
-import { detectDeepSeekModel, isDeepSeekDetectionActive } from "./deepseek-detector.ts";
-import { emptyStats, addUsage, extractUsageSnapshot, formatStats, formatStatus, markCompaction } from "./telemetry.ts";
-import { inspectProviderPayload, formatPayloadDiagnostics } from "./payload-diagnostics.ts";
-import { readContextPercent, recommendContextAction } from "./context-monitor.ts";
-import { detectPruner, formatPrunerStatus } from "./pruner-advisor.ts";
-import { HugeResultStore, maybeCapToolResult, registerLookupTool } from "./capper.ts";
+import { readConfig } from "./config.ts";
+import { detectDeepSeekModel } from "./model.ts";
+import { addUsage, extractUsageSnapshot, markCompaction } from "./stats.ts";
+import { inspectProviderPayload } from "./payload-diagnostics.ts";
+import { readContextPercent } from "./context-monitor.ts";
+import { HugeResultStore, maybeCapToolResult } from "./capper.ts";
 import { maybeRegisterDynamicProvider } from "./dynamic-provider.ts";
-import type { CacheStats, DeepSeekDetection, PayloadDiagnostics } from "./types.ts";
+import { createRuntimeState, type RuntimeState } from "./runtime-state.ts";
+import { ensureLookupTool, getDeepSeekCacheCompletions, registerCommands } from "./commands.ts";
+import { setStatus } from "./status.ts";
+import { detectTextualToolCall, handleBeforeAgentStart, handleBeforeProviderRequest, handleContext, handleSessionBeforeCompact, handleToolCall, handleTurnEnd, registerFoldTool, registerParallelReadTool } from "./cache-engine/index.ts";
+import { t } from "./i18n/index.ts";
 
-const STATUS_KEY = "deepseek-cache";
-const COMMAND = "deepseek-cache";
+export { getDeepSeekCacheCompletions } from "./commands.ts";
 
-interface RuntimeState {
-	config: ExtensionConfig;
-	stats: CacheStats;
-	detection: DeepSeekDetection;
-	lastPayload?: PayloadDiagnostics;
-	contextPct?: number;
-	dynamicModels: string[];
-	lookupRegistered: boolean;
-}
-
-export default async function deepSeekCache(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+export default async function deepSeekCache(pi: ExtensionAPI, initialCtx?: ExtensionContext): Promise<void> {
 	const store = new HugeResultStore();
-	const state: RuntimeState = {
-		config: readConfig(),
-		stats: emptyStats(),
-		detection: detectDeepSeekModel((ctx as any).model),
-		dynamicModels: [],
-		lookupRegistered: false,
+	let currentCtx: any = initialCtx;
+	const withCtx = (ctx?: any): any => {
+		if (ctx) currentCtx = ctx;
+		return currentCtx;
 	};
+	const state = createRuntimeState(currentCtx);
 
 	if (state.config.registerDynamicProvider) state.dynamicModels = await maybeRegisterDynamicProvider(pi, state.config);
 	if (state.config.hugeResultCapper) ensureLookupTool(pi, store, state);
+	registerFoldTool(pi, state);
+	registerParallelReadTool(pi, state);
 
-	registerCommands(pi, ctx, state, store);
+	registerCommands(pi, () => currentCtx, state, store);
+	registerLifecycleHandlers(pi, withCtx, state, store);
 
-	pi.on("session_start", async () => {
+	await refreshContextAndStatus(currentCtx, state);
+}
+
+function registerLifecycleHandlers(pi: ExtensionAPI, withCtx: (ctx?: any) => any, state: RuntimeState, store: HugeResultStore): void {
+	pi.on("session_start", async (_event: any, ctx: any) => {
+		const liveCtx = withCtx(ctx);
 		state.config = readConfig();
-		state.detection = detectDeepSeekModel((ctx as any).model);
+		state.detection = detectDeepSeekModel(liveCtx?.model);
 		if (state.config.hugeResultCapper) ensureLookupTool(pi, store, state);
-		await refreshContextAndStatus(ctx, state);
+		registerFoldTool(pi, state);
+		registerParallelReadTool(pi, state);
+		await refreshContextAndStatus(liveCtx, state);
 	});
 
-	pi.on("model_select", async () => {
+	pi.on("model_select", async (_event: any, ctx: any) => {
+		const liveCtx = withCtx(ctx);
 		state.config = readConfig();
-		state.detection = detectDeepSeekModel((ctx as any).model);
-		await refreshContextAndStatus(ctx, state);
+		state.detection = detectDeepSeekModel(liveCtx?.model);
+		await refreshContextAndStatus(liveCtx, state);
 	});
 
-	pi.on("before_provider_request", async (event: any) => {
-		if (!state.config.enabled || !state.config.diagnostics) return undefined;
-		state.lastPayload = inspectProviderPayload(event?.payload);
+	pi.on("before_agent_start", async (event: any, ctx: any) => {
+		const liveCtx = withCtx(ctx);
+		state.config = readConfig();
+		return handleBeforeAgentStart(event, liveCtx, state);
+	});
+
+	pi.on("context", async (event: any, ctx: any) => {
+		const liveCtx = withCtx(ctx);
+		state.config = readConfig();
+		return handleContext(event, liveCtx, state);
+	});
+
+	pi.on("session_before_compact", async (event: any, ctx: any) => {
+		const liveCtx = withCtx(ctx);
+		state.config = readConfig();
+		return handleSessionBeforeCompact(event, liveCtx, state);
+	});
+
+	pi.on("before_provider_request", async (event: any, ctx: any) => {
+		const liveCtx = withCtx(ctx);
+		state.config = readConfig();
+		if (!state.config.enabled) return undefined;
+		handleBeforeProviderRequest(event, liveCtx, state);
+		if (!state.config.diagnostics) return undefined;
+		state.lastPayload = inspectProviderPayload(event?.payload ?? event?.body ?? event);
 		if (state.config.persistDiagnostics) pi.appendEntry?.("deepseek-cache.payload", state.lastPayload);
 		return undefined;
+	});
+
+	pi.on("tool_call", async (event: any, ctx: any) => {
+		const liveCtx = withCtx(ctx);
+		state.config = readConfig();
+		return handleToolCall(event, liveCtx, state);
 	});
 
 	pi.on("tool_result", async (event: any) => {
@@ -62,139 +92,45 @@ export default async function deepSeekCache(pi: ExtensionAPI, ctx: ExtensionCont
 		return maybeCapToolResult(event, state.config, store);
 	});
 
-	pi.on("message_end", async (event: any) => {
+	pi.on("message_end", async (event: any, ctx: any) => {
+		const liveCtx = withCtx(ctx);
 		if (!state.config.enabled) return undefined;
-		const snapshot = extractUsageSnapshot(event?.message ?? event);
-		if (snapshot) state.stats = addUsage(state.stats, snapshot);
-		await refreshContextAndStatus(ctx, state);
+		const message = event?.message ?? event;
+		if (message?.role && message.role !== "assistant") return undefined;
+		if (detectTextualToolCall(message)) liveCtx?.ui?.notify?.(t(state.config, "engine.tool.textualMissing"), "warning");
+		const snapshot = extractUsageSnapshot(message);
+		if (snapshot) snapshot.turn = state.engine.turnIndex;
+		if (snapshot) state.stats = addUsage(state.stats, snapshot, state.detection.modelId, liveCtx?.model?.cost);
+		await refreshContextAndStatus(liveCtx, state);
 		return undefined;
 	});
 
-	pi.on("agent_end", async (event: any) => {
+	pi.on("agent_end", async (event: any, ctx: any) => {
+		const liveCtx = withCtx(ctx);
 		const snapshot = extractUsageSnapshot(event?.message ?? event?.assistantMessage ?? event);
-		if (snapshot) state.stats = addUsage(state.stats, snapshot);
-		await refreshContextAndStatus(ctx, state);
+		if (snapshot) snapshot.turn = state.engine.turnIndex;
+		if (snapshot && state.stats.requests === 0) state.stats = addUsage(state.stats, snapshot, state.detection.modelId, liveCtx?.model?.cost);
+		await refreshContextAndStatus(liveCtx, state);
 		return undefined;
 	});
 
-	pi.on("turn_end", async () => {
-		await refreshContextAndStatus(ctx, state);
+	pi.on("turn_end", async (_event: any, ctx: any) => {
+		const liveCtx = withCtx(ctx);
+		state.config = readConfig();
+		handleTurnEnd(_event, pi, liveCtx, state);
+		await refreshContextAndStatus(liveCtx, state);
 		return undefined;
 	});
 
-	pi.on("session_compact", async () => {
-		state.stats = markCompaction(state.stats);
-		await refreshContextAndStatus(ctx, state);
+	pi.on("session_compact", async (_event: any, ctx: any) => {
+		state.stats = markCompaction(state.stats, { turn: state.engine.turnIndex, reason: "host", completed: true });
+		await refreshContextAndStatus(withCtx(ctx), state);
 		return undefined;
 	});
-
-	await refreshContextAndStatus(ctx, state);
-}
-
-function ensureLookupTool(pi: any, store: HugeResultStore, state: RuntimeState): void {
-	if (state.lookupRegistered) return;
-	registerLookupTool(pi, store);
-	state.lookupRegistered = true;
 }
 
 async function refreshContextAndStatus(ctx: any, state: RuntimeState): Promise<void> {
+	state.detection = detectDeepSeekModel(ctx?.model);
 	state.contextPct = await readContextPercent(ctx);
 	setStatus(ctx, state);
-}
-
-function setStatus(ctx: any, state: RuntimeState): void {
-	if (!state.config.statusLine || !ctx?.ui?.setStatus) return;
-	if (!state.config.enabled || !isDeepSeekDetectionActive(state.detection)) {
-		ctx.ui.setStatus(STATUS_KEY, undefined);
-		return;
-	}
-	const rec = recommendContextAction(state.contextPct, state.config);
-	const suffix = rec.level === "warn" ? " ⚠" : rec.level === "danger" ? " ⛔" : "";
-	ctx.ui.setStatus(STATUS_KEY, `${formatStatus(state.stats, state.contextPct)}${suffix}`);
-}
-
-function registerCommands(pi: any, ctx: any, state: RuntimeState, store: HugeResultStore): void {
-	pi.registerCommand(COMMAND, {
-		description: "DeepSeek cache diagnostics and long-session recommendations",
-		handler: async (args: string) => {
-			const [sub = "status"] = String(args ?? "").trim().split(/\s+/).filter(Boolean);
-			state.config = readConfig();
-			state.detection = detectDeepSeekModel(ctx?.model);
-			state.contextPct = await readContextPercent(ctx);
-			switch (sub) {
-				case "status":
-					return buildStatus(pi, state);
-				case "diagnose":
-					return buildDiagnose(pi, state);
-				case "recommend-pruner":
-				case "pruner":
-					return formatPrunerStatus(detectPruner(pi));
-				case "reset-stats":
-					state.stats = emptyStats();
-					setStatus(ctx, state);
-					return "DeepSeek cache stats reset.";
-				case "enable-capper": {
-					const next = { ...state.config, hugeResultCapper: true };
-					const result = writeConfig(next);
-					if (result.ok) {
-						state.config = next;
-						ensureLookupTool(pi, store, state);
-						return `Huge-result capper enabled. Warning: enabling lookup tool mid-session can cause one DeepSeek cache-miss turn. Config: ${getConfigPath()}`;
-					}
-					return `Failed: ${result.error}`;
-				}
-				case "disable-capper": {
-					const next = { ...state.config, hugeResultCapper: false };
-					const result = writeConfig(next);
-					if (result.ok) {
-						state.config = next;
-						return `Huge-result capper disabled. Lookup tool remains registered until session reload. Config: ${getConfigPath()}`;
-					}
-					return `Failed: ${result.error}`;
-				}
-				case "init": {
-					const result = writeConfig(DEFAULT_CONFIG);
-					return result.ok ? `Wrote ${getConfigPath()}` : `Failed: ${result.error}`;
-				}
-				default:
-					return usage();
-			}
-		},
-	});
-}
-
-function buildStatus(pi: any, state: RuntimeState): string {
-	const context = recommendContextAction(state.contextPct, state.config);
-	return [
-		`config: ${getConfigPath()}`,
-		`enabled: ${state.config.enabled ? "yes" : "no"}`,
-		`model_kind: ${state.detection.kind}`,
-		`model_ok: ${state.detection.ok ? "yes" : "no"}`,
-		`model: ${state.detection.provider ?? "unknown"}/${state.detection.modelId ?? "unknown"}`,
-		state.detection.warnings.length ? `warnings:\n${state.detection.warnings.map((w) => `  - ${w}`).join("\n")}` : "warnings: none",
-		formatStats(state.stats),
-		`context_percent: ${state.contextPct === undefined ? "n/a" : `${Math.round(state.contextPct * 100)}%`}`,
-		`context_recommendation: ${context.message}`,
-		`dynamic_provider_models: ${state.dynamicModels.length ? state.dynamicModels.join(", ") : "disabled"}`,
-		`huge_result_capper: ${state.config.hugeResultCapper ? "on" : "off"}`,
-		`pruner_detected: ${detectPruner(pi).installed ? "yes" : "no"}`,
-	].join("\n");
-}
-
-function buildDiagnose(pi: any, state: RuntimeState): string {
-	return [buildStatus(pi, state), "", formatPayloadDiagnostics(state.lastPayload), "", formatPrunerStatus(detectPruner(pi))].join("\n");
-}
-
-function usage(): string {
-	return [
-		"Usage: /deepseek-cache <command>",
-		"commands:",
-		"  status",
-		"  diagnose",
-		"  recommend-pruner",
-		"  reset-stats",
-		"  enable-capper",
-		"  disable-capper",
-		"  init",
-	].join("\n");
 }

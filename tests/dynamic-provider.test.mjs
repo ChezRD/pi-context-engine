@@ -65,7 +65,7 @@ test("maybeRegisterDynamicProvider registers safe provider name by default", asy
   try {
     const ids = await maybeRegisterDynamicProvider({ registerProvider: (...args) => calls.push(args) }, { ...DEFAULT_CONFIG, registerDynamicProvider: true, deepseekApiKeyEnv: "TEST_DEEPSEEK_KEY" });
     assert.deepEqual(ids, ["deepseek-v4-flash"]);
-    assert.equal(calls[0][0], "deepseek-cache");
+    assert.equal(calls[0][0], "deepseek-cache-provider");
     assert.equal(calls[0][1].models[0].id, "deepseek-v4-flash");
   } finally {
     globalThis.fetch = oldFetch;

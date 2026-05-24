@@ -27,11 +27,18 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
-    "typebox": "*"
+    "typebox": "*",
+    "@juicesharp/rpiv-i18n": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.75.5",
     "typebox": "1.1.38",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "@juicesharp/rpiv-i18n": "1.12.0"
+  },
+  "peerDependenciesMeta": {
+    "@juicesharp/rpiv-i18n": {
+      "optional": true
+    }
   }
 }

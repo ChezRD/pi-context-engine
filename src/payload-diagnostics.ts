@@ -1,4 +1,5 @@
 import type { PayloadDiagnostics } from "./types.ts";
+import { t } from "./i18n/index.ts";
 
 function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -39,17 +40,21 @@ export function inspectProviderPayload(body: unknown): PayloadDiagnostics {
 	};
 }
 
-export function formatPayloadDiagnostics(diag: PayloadDiagnostics | undefined): string {
-	if (!diag) return "payload_diagnostics: unavailable";
+export function formatPayloadDiagnostics(diag: PayloadDiagnostics | undefined, config?: unknown): string {
+	if (!diag) return [t(config, "payload.title"), `  ${t(config, "payload.none")}`, `  ${t(config, "payload.runTurn")}`].join("\n");
+	const reasoningStatus = diag.assistantMissingReasoningContent === 0
+		? t(config, "payload.reasoningOk")
+		: t(config, "payload.reasoningMissing", { count: diag.assistantMissingReasoningContent });
 	return [
-		`payload_messages: ${diag.messageCount}`,
-		`payload_tools: ${diag.toolCount}`,
-		`payload_bytes: ${diag.payloadBytes}`,
-		`deepseek_thinking_type: ${diag.thinkingType ?? "n/a"}`,
-		`reasoning_effort: ${diag.reasoningEffort ?? "n/a"}`,
-		`include_usage: ${diag.includeUsage === undefined ? "n/a" : String(diag.includeUsage)}`,
-		`prompt_cache_key: ${diag.promptCacheKey ? "yes" : "no"}`,
-		`assistant_messages: ${diag.assistantMessages}`,
-		`assistant_missing_reasoning_content: ${diag.assistantMissingReasoningContent}`,
+		t(config, "payload.title"),
+		`  ${t(config, "payload.messages", { count: diag.messageCount })}`,
+		`  ${t(config, "payload.tools", { count: diag.toolCount })}`,
+		`  ${t(config, "payload.size", { bytes: diag.payloadBytes })}`,
+		`  ${t(config, "payload.thinking", { value: diag.thinkingType ?? t(config, "payload.notSet") })}`,
+		`  ${t(config, "payload.reasoningEffort", { value: diag.reasoningEffort ?? t(config, "payload.notSet") })}`,
+		`  ${t(config, "payload.includeUsage", { value: diag.includeUsage === undefined ? t(config, "payload.unknown") : diag.includeUsage ? t(config, "payload.yes") : t(config, "payload.no") })}`,
+		`  ${t(config, "payload.promptCacheKey", { value: diag.promptCacheKey ? t(config, "payload.present") : t(config, "payload.notPresent") })}`,
+		`  ${t(config, "payload.assistantMessages", { count: diag.assistantMessages })}`,
+		`  ${t(config, "payload.reasoningCheck", { status: reasoningStatus })}`,
 	].join("\n");
 }

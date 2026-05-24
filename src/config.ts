@@ -16,10 +16,30 @@ export interface ExtensionConfig {
 	hugeResultChars: number;
 	hugeResultHeadChars: number;
 	hugeResultTailChars: number;
+	prefixStabilityCheck: boolean;
+	prefixFingerprint: boolean;
+	toolFingerprint: boolean;
+	appendOnlyProjection: boolean;
 	autoCompactAtHighWatermark: boolean;
+	autoFold: boolean;
+	foldTailPct: number;
+	foldSummaryModel: string;
+	foldTool: boolean;
+	cachePromptInjection: boolean;
+	showCostSavings: boolean;
+	showCostBreakdown: boolean;
+	showSavings: boolean;
+	strictPrefixWarnings: boolean;
+	parallelReadTool: boolean;
 	contextWarnPct: number;
 	contextDangerPct: number;
 	contextCompactPct: number;
+	contextForceFoldPct: number;
+	foldHitRateThreshold: number;
+	adviseCompactHitRateThreshold: number;
+	showTurnEstimate: boolean;
+	minTurnsBetweenCompacts: number;
+	maxCompactsPerSession: number;
 	statusLine: boolean;
 	persistDiagnostics: boolean;
 }
@@ -32,7 +52,7 @@ export const DEFAULT_CONFIG: ExtensionConfig = {
 	mutateSystemPrompt: false,
 	mutateProviderPayload: false,
 	registerDynamicProvider: false,
-	dynamicProviderName: "deepseek-cache",
+	dynamicProviderName: "deepseek-cache-provider",
 	deepseekBaseUrl: "https://api.deepseek.com",
 	deepseekApiKeyEnv: "DEEPSEEK_API_KEY",
 	allowOverrideBuiltInDeepSeek: false,
@@ -40,10 +60,30 @@ export const DEFAULT_CONFIG: ExtensionConfig = {
 	hugeResultChars: 65_536,
 	hugeResultHeadChars: 6_000,
 	hugeResultTailChars: 6_000,
+	prefixStabilityCheck: true,
+	prefixFingerprint: true,
+	toolFingerprint: true,
+	appendOnlyProjection: false,
 	autoCompactAtHighWatermark: false,
+	autoFold: false,
+	foldTailPct: 0.20,
+	foldSummaryModel: "deepseek-v4-flash",
+	foldTool: false,
+	cachePromptInjection: true,
+	showCostSavings: true,
+	showCostBreakdown: true,
+	showSavings: true,
+	strictPrefixWarnings: false,
+	parallelReadTool: false,
 	contextWarnPct: 0.60,
 	contextDangerPct: 0.72,
 	contextCompactPct: 0.82,
+	contextForceFoldPct: 0.95,
+	foldHitRateThreshold: 0.85,
+	adviseCompactHitRateThreshold: 0.80,
+	showTurnEstimate: true,
+	minTurnsBetweenCompacts: 3,
+	maxCompactsPerSession: 6,
 	statusLine: true,
 	persistDiagnostics: false,
 };
@@ -89,10 +129,30 @@ export function parseConfig(value: unknown): ExtensionConfig {
 		hugeResultChars: num(value.hugeResultChars, DEFAULT_CONFIG.hugeResultChars, 1024),
 		hugeResultHeadChars: num(value.hugeResultHeadChars, DEFAULT_CONFIG.hugeResultHeadChars, 0),
 		hugeResultTailChars: num(value.hugeResultTailChars, DEFAULT_CONFIG.hugeResultTailChars, 0),
+		prefixStabilityCheck: bool(value.prefixStabilityCheck, DEFAULT_CONFIG.prefixStabilityCheck),
+		prefixFingerprint: bool(value.prefixFingerprint, DEFAULT_CONFIG.prefixFingerprint),
+		toolFingerprint: bool(value.toolFingerprint, DEFAULT_CONFIG.toolFingerprint),
+		appendOnlyProjection: bool(value.appendOnlyProjection, DEFAULT_CONFIG.appendOnlyProjection),
 		autoCompactAtHighWatermark: bool(value.autoCompactAtHighWatermark, DEFAULT_CONFIG.autoCompactAtHighWatermark),
+		autoFold: bool(value.autoFold, DEFAULT_CONFIG.autoFold),
+		foldTailPct: pct(value.foldTailPct, DEFAULT_CONFIG.foldTailPct),
+		foldSummaryModel: str(value.foldSummaryModel, DEFAULT_CONFIG.foldSummaryModel),
+		foldTool: bool(value.foldTool, DEFAULT_CONFIG.foldTool),
+		cachePromptInjection: bool(value.cachePromptInjection, DEFAULT_CONFIG.cachePromptInjection),
+		showCostSavings: bool(value.showCostSavings, DEFAULT_CONFIG.showCostSavings),
+		showCostBreakdown: bool(value.showCostBreakdown, DEFAULT_CONFIG.showCostBreakdown),
+		showSavings: bool(value.showSavings, DEFAULT_CONFIG.showSavings),
+		strictPrefixWarnings: bool(value.strictPrefixWarnings, DEFAULT_CONFIG.strictPrefixWarnings),
+		parallelReadTool: bool(value.parallelReadTool, DEFAULT_CONFIG.parallelReadTool),
 		contextWarnPct: pct(value.contextWarnPct, DEFAULT_CONFIG.contextWarnPct),
 		contextDangerPct: pct(value.contextDangerPct, DEFAULT_CONFIG.contextDangerPct),
-		contextCompactPct: pct(value.contextCompactPct, DEFAULT_CONFIG.contextCompactPct),
+		contextCompactPct: pct(value.contextFoldPct ?? value.contextCompactPct, DEFAULT_CONFIG.contextCompactPct),
+		contextForceFoldPct: pct(value.contextForceFoldPct, DEFAULT_CONFIG.contextForceFoldPct),
+		foldHitRateThreshold: pct(value.foldHitRateThreshold, DEFAULT_CONFIG.foldHitRateThreshold),
+		adviseCompactHitRateThreshold: pct(value.adviseCompactHitRateThreshold, DEFAULT_CONFIG.adviseCompactHitRateThreshold),
+		showTurnEstimate: bool(value.showTurnEstimate, DEFAULT_CONFIG.showTurnEstimate),
+		minTurnsBetweenCompacts: num(value.minTurnsBetweenCompacts, DEFAULT_CONFIG.minTurnsBetweenCompacts, 0),
+		maxCompactsPerSession: num(value.maxCompactsPerSession, DEFAULT_CONFIG.maxCompactsPerSession, 1),
 		statusLine: bool(value.statusLine, DEFAULT_CONFIG.statusLine),
 		persistDiagnostics: bool(value.persistDiagnostics, DEFAULT_CONFIG.persistDiagnostics),
 	};
