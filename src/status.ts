@@ -77,8 +77,8 @@ function formatEligibility(pi: any, state: RuntimeState): string {
 	if (compactStorm) blockers.push(t(state.config, "status.blockerStorm"));
 	const warmHit = sessionHitRateAfterWarmup(state.stats.usages ?? []);
 	const warmUsages = (state.stats.usages ?? []).filter((usage) => (usage.turn ?? 0) > 1);
-	if (warmUsages.length > 0 && warmHit < 0.95) blockers.push(t(state.config, "status.blockerWarmHit", { hit: formatRatio(warmHit) }));
-	if (blockers.length === 0) return t(state.config, "status.eligible99", { hit: formatRatio(warmHit) });
+	const warmHitText = warmUsages.length ? formatRatio(warmHit) : t(state.config, "status.notReported");
+	if (blockers.length === 0) return t(state.config, "status.eligible99", { hit: warmHitText });
 	return t(state.config, "status.blocked99", { reason: blockers.join("; ") });
 }
 

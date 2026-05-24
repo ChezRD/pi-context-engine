@@ -73,6 +73,7 @@ test("config parser accepts percent in 0..100 form", () => {
   assert.equal(config.dynamicProviderName, DEFAULT_CONFIG.dynamicProviderName);
 });
 
+
 test("classifies pruner cache profiles", () => {
   assert.deepEqual(classifyPruner({ enabled: false }).cacheProfile, "risky");
   assert.deepEqual(classifyPruner({ enabled: true, pruneOn: "every-turn" }).cacheProfile, "bad");

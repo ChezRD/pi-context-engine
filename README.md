@@ -39,13 +39,13 @@ DeepSeek prompt cache reuses tokens only when the beginning of the provider prom
 
 It intentionally does **not** fingerprint appended user/assistant/tool tail messages, request ids, timestamps, debug fields, or tool order noise. Normal chat append should not count as prefix drift. Real drift means one of the stable prefix components changed: model, system prompt, tool schema, reasoning, or temperature.
 
-99% cache hit is possible only when:
+The Reasonix-style target metric remains:
 
 ```text
 cacheRead / (input + cacheRead + cacheWrite) >= 0.99
 ```
 
-After warmup, `/deepseek-cache status` reports `99% possible` only when prefix changes are zero, tool changes are zero, pruner profile is not bad, compact storm guard is quiet, and warm hit is at least 95% in local telemetry.
+`/deepseek-cache status` reports `99% possible` when the cache-first invariants are intact: prefix changes are zero, tool changes are zero, pruner profile is not bad, and compact storm guard is quiet. Warm hit is shown as observed telemetry, not as a hard eligibility threshold.
 
 ## Install
 
@@ -109,17 +109,17 @@ Example status output:
 
 ```text
 DeepSeek Cache: native deepseek-v4-flash
-  Cache: 96% session / 97% last · cached 97 · uncached 3
+  Cache: 99% session / 99% last · cached 99 · uncached 1
   Context: 55% · green · ~8 turns
   Engine: prefix changes 0 · history rewrites 0 · hold
   Prefix hash: a1b2c3d4e5f6 · tool hash: 9a8b7c6d5e4f · tool changes 0 · last reason: not reported
-  99% possible: prefix stable, tools stable, pruner acceptable, warm hit 96%
+  99% possible: Reasonix invariants stable; observed warm hit 99%
 ```
 
 Example blocker output:
 
 ```text
-99% blocked: tools changed 1×; pruner profile bad — every-turn rewrites prompt-cache prefix too often; warm hit below 95% (83%)
+99% blocked: tools changed 1×; pruner profile bad — every-turn rewrites prompt-cache prefix too often
 ```
 
 ## Commands
@@ -148,13 +148,13 @@ The extension always runs in balanced cache-monitor mode:
 - reads Pi's existing cache-aware `message.usage.cost` on `message_end` without overriding it
 - fingerprints real provider payload prefix in `before_provider_request`
 - monitors prefix/tool stability, hit rate, context ratio, turns-to-overflow, and savings
-- shows fold/compact/hold options when context reaches orange/red zones
+- auto-folds through host compaction when context pressure + weak hit rate cross fold thresholds; otherwise shows fold/compact/hold options
 - keeps pruner evaluation internal to 99% eligibility checks
 
 Default behavior does not change:
 
 - selected provider
-- active tools, unless `foldTool` or `parallelReadTool` is explicitly enabled
+- active tools, except the default `deepseek_cache_fold` helper when `autoFold` is enabled, or optional `parallelReadTool`
 - system prompt, unless `cachePromptInjection` is enabled
 - context messages
 - DeepSeek thinking configuration
@@ -165,8 +165,8 @@ Compaction guardrails:
 
 - default cooldown: `minTurnsBetweenCompacts = 3`
 - default session cap: `maxCompactsPerSession = 6`
-- `hold` suppresses fold/compact advice until cooldown expires, except critical `force_fold`
-- manual `/deepseek-cache fold` and `/deepseek-cache compact` require explicit user action
+- `hold` suppresses fold/compact advice and auto-fold until cooldown expires, except critical `force_fold`
+- `/deepseek-cache fold` and `/deepseek-cache compact` remain available for explicit user action
 
 ## Long-session pruning
 
@@ -239,7 +239,7 @@ Recommendation:
 
 ## Manual DeepSeek 99% run checklist
 
-Repo tests prove stable-prefix behavior and `>=95%` warm hit with mocks. Real `>=99%` must be checked against DeepSeek provider usage in an actual Pi session.
+Repo tests prove stable-prefix behavior and `>=99%` warm hit with mocks. Real `>=99%` must be checked against DeepSeek provider usage in an actual Pi session.
 
 Before starting:
 
@@ -271,7 +271,7 @@ During validation:
    - `Cache profile: good` or `risky`, not `bad`
    - no compact storm guard warning
 
-If `99% blocked` appears, fix blocker first. Common blockers: changed tools, system prompt drift, `every-turn` pruner, low warm hit, compact storm.
+If `99% blocked` appears, fix blocker first. Common blockers: changed tools, system prompt drift, `every-turn` pruner, compact storm. Low warm hit without blockers means provider/session telemetry is saying the invariants are not actually holding; inspect payload drift.
 
 ## Optional huge-result capper
 
@@ -329,16 +329,16 @@ Default config:
   "deepseekBaseUrl": "https://api.deepseek.com",
   "deepseekApiKeyEnv": "DEEPSEEK_API_KEY",
   "allowOverrideBuiltInDeepSeek": false,
-  "hugeResultCapper": false,
-  "hugeResultChars": 65536,
+  "hugeResultCapper": true,
+  "hugeResultChars": 12000,
   "hugeResultHeadChars": 6000,
   "hugeResultTailChars": 6000,
   "prefixStabilityCheck": true,
   "prefixFingerprint": true,
   "toolFingerprint": true,
-  "appendOnlyProjection": false,
+  "appendOnlyProjection": true,
   "autoCompactAtHighWatermark": false,
-  "autoFold": false,
+  "autoFold": true,
   "foldTailPct": 0.2,
   "foldSummaryModel": "deepseek-v4-flash",
   "foldTool": false,
@@ -367,9 +367,9 @@ Default config:
 | `prefixStabilityCheck` | `true` | Secondary context-prefix drift check |
 | `prefixFingerprint` | `true` | Fingerprint real provider payload prefix |
 | `toolFingerprint` | `true` | Track tool schema hash drift |
-| `appendOnlyProjection` | `false` | Experimental provider-facing `[system, stable summary, append-only tail]` projection after controlled compact |
-| `autoFold` | `false` | Reserved; manual fold remains explicit by default |
-| `foldTailPct` | `0.2` | Reserved for fold prompt strategy; host owns compaction boundary by default |
+| `appendOnlyProjection` | `true` | Reasonix-like provider-facing `[system, stable summary, append-only tail]` projection after controlled compact |
+| `autoFold` | `true` | Enable cache-fold tooling/instructions under context pressure |
+| `foldTailPct` | `0.2` | Tail preservation target for fold prompt strategy; host owns compaction boundary |
 | `cachePromptInjection` | `true` | Add stable cache guidance via `before_agent_start` |
 | `showCostSavings` | `true` | Show cache savings in status/advice |
 | `showCostBreakdown` | `true` | Show cost breakdown where available |
@@ -381,13 +381,13 @@ Default config:
 | `contextDangerPct` | `0.72` | YELLOW→ORANGE threshold |
 | `contextCompactPct` | `0.82` | ORANGE→RED threshold |
 | `contextForceFoldPct` | `0.95` | CRITICAL force-fold threshold |
-| `foldHitRateThreshold` | `0.85` | Auto fold in orange zone when hit rate drops below this |
-| `adviseCompactHitRateThreshold` | `0.8` | Recommend compact when hit rate is already low |
+| `foldHitRateThreshold` | `0.85` | Fold recommendation threshold under context pressure |
+| `adviseCompactHitRateThreshold` | `0.8` | Reserved compatibility threshold for weak-hit recommendations |
 | `mutateSystemPrompt` | `false` | Reserved compatibility flag; cache prompt injection is controlled separately |
 | `mutateProviderPayload` | `false` | Reserved; no payload patching by default |
 | `registerDynamicProvider` | `false` | Register optional `deepseek-cache` provider |
-| `hugeResultCapper` | `false` | Enable huge-output elision + lookup tool |
-| `autoCompactAtHighWatermark` | `false` | Legacy compatibility flag; explicit fold/compact remains preferred |
+| `hugeResultCapper` | `true` | Enable huge-output elision + lookup tool |
+| `autoCompactAtHighWatermark` | `false` | Legacy compatibility flag; auto behavior is controlled by `autoFold` + thresholds |
 | `statusLine` | `true` | Show cache status entry |
 | `persistDiagnostics` | `false` | Persist payload diagnostics as session custom entries |
 

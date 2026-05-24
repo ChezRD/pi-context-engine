@@ -1,6 +1,6 @@
 import type { RuntimeState } from "../runtime-state.ts";
 import { costToCompact, deepSeekOfficialCost, formatRatio } from "../stats.ts";
-import { buildContextStatus } from "./decision-engine.ts";
+import { buildContextStatus, canCompactNow } from "./decision-engine.ts";
 import { compactOptions } from "./custom-compaction.ts";
 import { activateAppendOnlyProjectionFromCompact } from "./append-only-projection.ts";
 import { markCompaction } from "../stats.ts";
@@ -78,5 +78,9 @@ export function handleTurnEnd(pi: any, ctx: any, state: RuntimeState): void {
 	state.engine.lastZone = status.zone;
 	state.engine.lastDecision = status.decision;
 	if (state.engine.holdUntilTurn !== undefined && state.engine.turnIndex < state.engine.holdUntilTurn && status.decision !== "force_fold") return;
+	if (state.config.autoFold && (status.decision === "fold" || status.decision === "force_fold") && canCompactNow(state)) {
+		const result = requestFold(ctx, state);
+		if (result.ok) return;
+	}
 	if (status.zone === "orange" || status.zone === "red" || status.zone === "critical") notify(ctx, choiceText(state, status), "warning");
 }

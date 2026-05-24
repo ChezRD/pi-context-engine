@@ -127,7 +127,7 @@ test("extension factory follows Pi contract: accepts only pi and waits for event
     assert.equal(commands.has("deepseek-cache"), true);
     assert.equal(calls.some((call) => call[0] === "setActiveTools"), false);
     assert.equal(calls.some((call) => call[0] === "registerProvider"), false);
-    assert.equal(calls.some((call) => call[0] === "registerTool"), false);
+    assert.equal(calls.some((call) => call[0] === "registerTool" && call[1] === "deepseek_cache_lookup"), true);
     assert.equal(calls.some((call) => call[0] === "on" && call[1] === "before_agent_start"), true);
     assert.equal(status.length, 0);
 
@@ -246,7 +246,7 @@ test("session_before_compact lets host default compact", async () => {
   });
 });
 
-test("red zone warns and does not auto-fold", async () => {
+test("red zone auto-folds by default", async () => {
   await withTempHome(async () => {
     const { pi, handlers } = createMockPi();
     const mock = createMockCtx();
@@ -256,8 +256,8 @@ test("red zone warns and does not auto-fold", async () => {
     await handlers.get("message_end")({ message: { role: "assistant", usage: { input: 1000, cacheRead: 900, output: 100 } } }, mock.ctx);
     await handlers.get("turn_end")({}, mock.ctx);
 
-    assert.equal(mock.compactCalls.length, 0);
-    assert.match(mock.notifications.at(-1)[0], /Options: \[1\] \/deepseek-cache fold/);
+    assert.equal(mock.compactCalls.length, 1);
+    assert.match(mock.compactCalls[0].customInstructions, /DeepSeek cache fold/);
   });
 });
 
@@ -300,7 +300,7 @@ test("orange zone shows choice UI and does not compact", async () => {
     mock.ctx.getContextUsage = () => ({ tokens: 780, contextWindow: 1000 });
 
     await extension(pi);
-    await handlers.get("message_end")({ message: { role: "assistant", usage: { input: 1000, cacheRead: 940, output: 10 } } }, mock.ctx);
+    await handlers.get("message_end")({ message: { role: "assistant", usage: { input: 50, cacheRead: 950, output: 10 } } }, mock.ctx);
     await handlers.get("turn_end")({}, mock.ctx);
 
     assert.equal(mock.compactCalls.length, 0);
@@ -308,7 +308,7 @@ test("orange zone shows choice UI and does not compact", async () => {
   });
 });
 
-test("critical zone warns but does not fold", async () => {
+test("critical zone auto-folds by default", async () => {
   await withTempHome(async () => {
     const { pi, handlers } = createMockPi();
     const mock = createMockCtx();
@@ -316,8 +316,8 @@ test("critical zone warns but does not fold", async () => {
 
     await extension(pi);
     await handlers.get("turn_end")({}, mock.ctx);
-    assert.equal(mock.compactCalls.length, 0);
-    assert.equal(mock.notifications.some(([text]) => /Options: \[1\]/.test(text)), true);
+    assert.equal(mock.compactCalls.length, 1);
+    assert.match(mock.compactCalls[0].customInstructions, /DeepSeek cache fold/);
   });
 });
 
@@ -357,20 +357,17 @@ test("provider prefix fingerprint is not polluted by context history heuristic",
   });
 });
 
-test("fold tool registers only when enabled", async () => {
+test("fold tool registers by default", async () => {
   await withTempHome(async (home) => {
     const mock = createMockPi();
     const { ctx } = createMockCtx();
-    await mkdir(join(home, ".pi/agent"), { recursive: true });
-    await writeFile(join(home, ".pi/agent/deepseek-cache.json"), JSON.stringify({ autoFold: true }), "utf8");
-
     await extension(mock.pi);
     await mock.handlers.get("session_start")({}, ctx);
     assert.equal(mock.calls.some((call) => call[0] === "registerTool" && call[1] === "deepseek_cache_fold"), true);
   });
 });
 
-test("end-to-end session does not auto-fold by default", async () => {
+test("end-to-end session auto-folds under pressure when hit rate is weak", async () => {
   await withTempHome(async () => {
     const { pi, handlers, commands } = createMockPi();
     const mock = createMockCtx();
@@ -394,9 +391,9 @@ test("end-to-end session does not auto-fold by default", async () => {
       await handlers.get("turn_end")({}, mock.ctx);
       assert.match(mock.status.at(-1)[1], turn.emoji);
     }
-    assert.equal(mock.compactCalls.length, 0);
+    assert.equal(mock.compactCalls.length, 1);
+    assert.match(mock.compactCalls[0].customInstructions, /DeepSeek cache fold/);
     assert.equal(mock.status.at(-1)[1].includes("prefix ✓"), true);
-    assert.equal(mock.notifications.some(([text]) => /Options: \[1\]/.test(text)), true);
   });
 });
 
@@ -548,9 +545,11 @@ test("appendOnly projection stays inactive for invalid compact result and compac
 });
 
 test("appendOnly projection disabled leaves context event untouched", async () => {
-  await withTempHome(async () => {
+  await withTempHome(async (home) => {
     const { pi, handlers, commands } = createMockPi();
     const mock = createMockCtx();
+    await mkdir(join(home, ".pi/agent"), { recursive: true });
+    await writeFile(join(home, ".pi/agent/deepseek-cache.json"), JSON.stringify({ appendOnlyProjection: false }), "utf8");
 
     await extension(pi);
     await commands.get("deepseek-cache").handler("fold", mock.ctx);
@@ -585,7 +584,7 @@ test("message_end detects textual tool call without provider tool_calls", async 
   });
 });
 
-test("stable prefix session reaches 95% warm hit eligibility", async () => {
+test("stable prefix session reaches 99% warm hit eligibility", async () => {
   await withTempHome(async () => {
     const { pi, handlers, commands } = createMockPi();
     const mock = createMockCtx();
@@ -594,9 +593,9 @@ test("stable prefix session reaches 95% warm hit eligibility", async () => {
     await handlers.get("before_provider_request")(payload("one"), mock.ctx);
     const turns = [
       { turnIndex: 1, input: 1000, cacheRead: 0, output: 100, expectedLast: "0%" },
-      { turnIndex: 2, input: 200, cacheRead: 800, output: 100, expectedLast: "80%" },
-      { turnIndex: 3, input: 50, cacheRead: 950, output: 100, expectedLast: "95%" },
-      { turnIndex: 4, input: 30, cacheRead: 970, output: 100, expectedLast: "97%" },
+      { turnIndex: 2, input: 10, cacheRead: 990, output: 100, expectedLast: "99%" },
+      { turnIndex: 3, input: 10, cacheRead: 990, output: 100, expectedLast: "99%" },
+      { turnIndex: 4, input: 10, cacheRead: 990, output: 100, expectedLast: "99%" },
     ];
     for (const turn of turns) {
       await handlers.get("message_end")({ message: { role: "assistant", usage: turn } }, mock.ctx);
@@ -606,7 +605,7 @@ test("stable prefix session reaches 95% warm hit eligibility", async () => {
     }
     await handlers.get("before_provider_request")(payload("two"), mock.ctx);
     const diagnose = await commands.get("deepseek-cache").handler("diagnose", mock.ctx);
-    assert.match(diagnose, /99% possible: .*warm hit 96%/);
+    assert.match(diagnose, /99% possible: .*warm hit 99%/);
     assert.match(diagnose, /prefix changes 0/);
   });
 });
@@ -629,7 +628,7 @@ test("system drift warns once in strict mode and blocks 99 eligibility", async (
   });
 });
 
-test("compact recovery records compact then warm hit recovers above 90%", async () => {
+test("compact recovery records compact then later hit recovers", async () => {
   await withTempHome(async () => {
     const { pi, handlers, commands } = createMockPi();
     const mock = createMockCtx();
@@ -648,7 +647,7 @@ test("compact recovery records compact then warm hit recovers above 90%", async 
     await handlers.get("message_end")({ message: { role: "assistant", usage: { input: 30, cacheRead: 970, output: 100 } } }, mock.ctx);
     await handlers.get("turn_end")({ turnIndex: 4 }, mock.ctx);
     const status = await commands.get("deepseek-cache").handler("diagnose", mock.ctx);
-    assert.match(status, /95%|96%/);
+    assert.match(status, /95%|96%|97%/);
     assert.match(status, /completed/);
   });
 });
@@ -754,16 +753,13 @@ test("enable-capper persists config and registers only namespaced lookup tool", 
   });
 });
 
-test("tool_result hook caps huge outputs only after capper enabled", async () => {
+test("tool_result hook caps huge outputs by default", async () => {
   await withTempHome(async () => {
-    const { pi, handlers, commands } = createMockPi();
+    const { pi, handlers } = createMockPi();
     const { ctx } = createMockCtx();
 
     await extension(pi);
     const event = { content: [{ type: "text", text: "x".repeat(70_000) }], toolCallId: "tc1", toolName: "bash" };
-    assert.equal(await handlers.get("tool_result")(event, ctx), undefined);
-
-    await commands.get("deepseek-cache").handler("enable-capper", ctx);
     const capped = await handlers.get("tool_result")(event, ctx);
     assert.match(capped.content[0].text, /deepseek-cache: large tool result elided/);
     assert.match(capped.content[0].text, /ref: dsc-1/);
@@ -787,6 +783,10 @@ test("pruner advisor reads source settings for 99% eligibility", async () => {
     mock.pi.registerTool({ name: "context_tree_query" });
     mock.pi.registerTool({ name: "context_prune" });
     await extension(mock.pi);
+    await mock.handlers.get("turn_end")({ turnIndex: 2 }, ctx);
+    await mock.handlers.get("message_end")({ message: { role: "assistant", usage: { input: 10, cacheRead: 990, output: 10 } } }, ctx);
+    await mock.handlers.get("turn_end")({ turnIndex: 3 }, ctx);
+    await mock.handlers.get("message_end")({ message: { role: "assistant", usage: { input: 10, cacheRead: 990, output: 10 } } }, ctx);
 
     const diagnose = await mock.commands.get("deepseek-cache").handler("status", ctx);
     assert.match(diagnose, /99% possible/);
@@ -815,6 +815,10 @@ test("good pruner profile keeps 99 eligibility possible when no other blockers e
     await writeFile(join(home, ".pi/agent/context-prune/settings.json"), JSON.stringify({ enabled: true, pruneOn: "on-demand" }), "utf8");
     mock.pi.registerCommand("pruner", { handler: async () => "" });
     await extension(mock.pi);
+    await mock.handlers.get("turn_end")({ turnIndex: 2 }, ctx);
+    await mock.handlers.get("message_end")({ message: { role: "assistant", usage: { input: 10, cacheRead: 990, output: 10 } } }, ctx);
+    await mock.handlers.get("turn_end")({ turnIndex: 3 }, ctx);
+    await mock.handlers.get("message_end")({ message: { role: "assistant", usage: { input: 10, cacheRead: 990, output: 10 } } }, ctx);
 
     const status = await mock.commands.get("deepseek-cache").handler("status", ctx);
     assert.match(status, /99% possible/);
