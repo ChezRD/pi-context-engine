@@ -9,6 +9,7 @@ export interface ModelVisibleSection {
 export interface ModelVisibleBlockOptions {
 	kind: string;
 	ui: "custom-rendered" | "hidden";
+	instructions?: string;
 	metadata?: Record<string, unknown>;
 	sections?: ModelVisibleSection[];
 }
@@ -17,6 +18,11 @@ export function buildModelVisibleContext(options: ModelVisibleBlockOptions): str
 	const lines = [
 		MODEL_VISIBLE_CONTEXT_MARKER,
 		`<model_visible_context schema="${MODEL_VISIBLE_CONTEXT_SCHEMA}" kind="${options.kind}" ui="${options.ui}">`,
+	];
+	if (options.instructions?.trim()) {
+		lines.push("<instructions>", options.instructions.trim(), "</instructions>");
+	}
+	lines.push(
 		"<metadata>",
 		JSON.stringify({
 			schema: MODEL_VISIBLE_CONTEXT_SCHEMA,
@@ -25,7 +31,7 @@ export function buildModelVisibleContext(options: ModelVisibleBlockOptions): str
 			...(options.metadata ?? {}),
 		}, null, 2),
 		"</metadata>",
-	];
+	);
 	for (const section of options.sections ?? []) {
 		lines.push(`<payload name="${section.name}">`, section.content, "</payload>");
 	}

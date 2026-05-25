@@ -55,6 +55,7 @@ function formatPruneNext(state: RuntimeState): string {
 	if (mode === "on-demand") return t(state.config, "status.pruneNext.manual");
 	const target = Math.max(1, state.config.pruneBatchSize);
 	const current = Math.min(state.engine.prune.batchStepCounter, target);
+	if (mode === "agent-message" && state.engine.prune.awaitingAgentMessage && pendingPruneToolCalls(state) > 0) return t(state.config, "status.pruneNext.agentMessage");
 	if (current >= target && pendingPruneToolCalls(state) > 0) return t(state.config, "status.pruneNext.now");
 	const remaining = Math.max(0, target - current);
 	return t(state.config, "status.pruneNext.turns", { turns: remaining });
@@ -102,18 +103,18 @@ export function buildDetailedStatus(pi: any, state: RuntimeState): string {
 
 export function formatPruneSummarizerTrace(state: RuntimeState): string {
 	const impact = state.engine.prune.impact;
-	if (!state.config.diagnostics || !impact?.lastSummarizePrompt) return "Last prune summarizer trace\n  not captured";
+	if (!state.config.diagnostics || !impact?.lastSummarizePrompt) return `${t(state.config, "status.pruneTraceTitle")}\n  ${t(state.config, "status.notCaptured")}`;
 	const accepted = impact.lastAcceptedSummaries?.length
 		? impact.lastAcceptedSummaries.map((summary, index) => `  [${index + 1}] ${summary}`).join("\n")
-		: "  none";
+		: `  ${t(state.config, "status.none")}`;
 	return [
-		"Last prune summarizer trace",
-		`  maxTokens: ${impact.lastSummarizeMaxTokens ?? "n/a"}`,
-		"  prompt:",
+		t(state.config, "status.pruneTraceTitle"),
+		`  ${t(state.config, "status.maxTokens")}: ${impact.lastSummarizeMaxTokens ?? t(state.config, "status.na")}`,
+		`  ${t(state.config, "status.prompt")}:`,
 		indentBlock(impact.lastSummarizePrompt, "    "),
-		"  raw response:",
-		indentBlock(impact.lastSummarizeResponse ?? "n/a", "    "),
-		"  accepted summaries:",
+		`  ${t(state.config, "status.rawResponse")}:`,
+		indentBlock(impact.lastSummarizeResponse ?? t(state.config, "status.na"), "    "),
+		`  ${t(state.config, "status.acceptedSummaries")}:`,
 		accepted,
 	].join("\n");
 }
@@ -282,17 +283,17 @@ function formatPruneDetails(state: RuntimeState): string {
 		last: (impact.lastSummarizeCost ?? 0).toFixed(4),
 	});
 	const slice = t(state.config, "status.pruneSliceImpact", {
-		raw: formatTokenCount(impact.summarizeRawChars ?? 0),
-		summary: formatTokenCount(impact.summarizeSummaryChars ?? 0),
-		delta: formatTokenCount(Math.max(0, (impact.summarizeRawChars ?? 0) - (impact.summarizeSummaryChars ?? 0))),
+		raw: formatTokenCount(impact.lastSummarizeRawChars ?? 0),
+		summary: formatTokenCount(impact.lastSummarizeSummaryChars ?? 0),
+		delta: formatTokenCount(Math.max(0, (impact.lastSummarizeRawChars ?? 0) - (impact.lastSummarizeSummaryChars ?? 0))),
 		lastRaw: formatTokenCount(impact.lastSummarizeRawChars ?? 0),
 		lastSummary: formatTokenCount(impact.lastSummarizeSummaryChars ?? 0),
 	});
 	const miss = t(state.config, "status.pruneMissImpact", {
 		requests: impact.postPruneRequests,
-		miss: formatTokenCount(impact.postPruneMissTokens),
+		miss: formatTokenCount(impact.lastPostPruneMissTokens ?? 0),
 		cache: formatTokenCount(impact.postPruneCacheReadTokens),
-		cost: impact.postPruneMissCost.toFixed(4),
+		cost: (impact.lastPostPruneMissCost ?? 0).toFixed(4),
 		last: (impact.lastPostPruneMissCost ?? 0).toFixed(4),
 		hit: impact.lastPostPruneHitRate === undefined ? "n/a" : formatRatio(impact.lastPostPruneHitRate),
 	});

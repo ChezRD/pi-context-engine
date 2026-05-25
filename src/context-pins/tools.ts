@@ -2,19 +2,20 @@ import { Type } from "typebox";
 import type { Static } from "typebox";
 import type { RuntimeState } from "../runtime-state.ts";
 import { openCacheCheckpoint } from "../cache-engine/cache-checkpoints.ts";
+import { t } from "../i18n/index.ts";
 import { discoverSkills, findSkill, loadSkillAsPin, MAX_SKILL_DISPLAY_CHARS } from "./skills.ts";
 
 const ContextPinSkillParams = Type.Object({
-	name: Type.String({ description: "Skill name to load and pin." }),
-	arguments: Type.Optional(Type.String({ description: "Optional task-specific arguments for the skill." })),
+	name: Type.String({ description: t("tool.pinSkill.param.name") }),
+	arguments: Type.Optional(Type.String({ description: t("tool.pinSkill.param.arguments") })),
 });
 
 const ContextPinParams = Type.Object({
-	kind: Type.String({ description: "Pin kind: priority, user-memory, project-memory, working-rule." }),
-	name: Type.String({ description: "Short stable name for this pin (e.g. 'no-legacy-context-tag')." }),
-	content: Type.String({ description: "The exact rule, fact, or decision to preserve." }),
-	priority: Type.Optional(Type.String({ description: "'high' for critical constraints." })),
-	scope: Type.Optional(Type.String({ description: "'session' (default), 'project', or 'global'." })),
+	kind: Type.String({ description: t("tool.pin.param.kind") }),
+	name: Type.String({ description: t("tool.pin.param.name") }),
+	content: Type.String({ description: t("tool.pin.param.content") }),
+	priority: Type.Optional(Type.String({ description: t("tool.pin.param.priority") })),
+	scope: Type.Optional(Type.String({ description: t("tool.pin.param.scope") })),
 });
 
 /**
@@ -24,8 +25,8 @@ export function registerPinTools(pi: any, state: RuntimeState): void {
 	// ── context_pin_skill ──
 	pi.registerTool?.({
 		name: "context_pin_skill",
-		label: "Pin Skill",
-		description: "Load a skill body as an active pinned block. The full skill instructions will be preserved across semantic folds.",
+		label: t("tool.pinSkill.label"),
+		description: t("tool.pinSkill.description"),
 		parameters: ContextPinSkillParams,
 		execute: async (_id: string, params: Static<typeof ContextPinSkillParams>, _signal: any, _onUpdate: any, ctx: any) => {
 			const projectDir = ctx?.projectDir ?? process.cwd();
@@ -37,7 +38,7 @@ export function registerPinTools(pi: any, state: RuntimeState): void {
 				return {
 					content: [{
 						type: "text",
-						text: `Skill "${params.name}" not found. Available skills: ${names}`,
+						text: t("tool.pinSkill.notFound", { name: params.name, skills: names }),
 					}],
 				};
 			}
@@ -55,13 +56,13 @@ export function registerPinTools(pi: any, state: RuntimeState): void {
 
 			// Compact transcript display — show only summary, full body stays model-visible
 			const preview = loaded.body.length > MAX_SKILL_DISPLAY_CHARS
-				? loaded.body.slice(0, MAX_SKILL_DISPLAY_CHARS) + "\n... (truncated)"
+				? loaded.body.slice(0, MAX_SKILL_DISPLAY_CHARS) + `\n${t("tool.pinSkill.previewTruncated")}`
 				: loaded.body;
 
 			return {
 				content: [{
 					type: "text",
-					text: `${changed ? "Pinned" : "Already active"} skill: "${loaded.name}"\n\n${loaded.content}\n\n---\nPreview:\n${preview}`,
+					text: t(changed ? "tool.pinSkill.result.pinned" : "tool.pinSkill.result.active", { name: loaded.name, content: loaded.content, preview }),
 				}],
 			};
 		},
@@ -70,8 +71,8 @@ export function registerPinTools(pi: any, state: RuntimeState): void {
 	// ── context_pin ──
 	pi.registerTool?.({
 		name: "context_pin",
-		label: "Context Pin",
-		description: "Pin a priority fact, user decision, project invariant, or working rule that must survive context pruning/folding.",
+		label: t("tool.pin.label"),
+		description: t("tool.pin.description"),
 		parameters: ContextPinParams,
 		execute: async (_id: string, params: Static<typeof ContextPinParams>, _signal: any, _onUpdate: any, _ctx: any) => {
 			const kind = params.kind === "priority" ? "priority"
@@ -100,7 +101,7 @@ export function registerPinTools(pi: any, state: RuntimeState): void {
 			return {
 				content: [{
 					type: "text",
-					text: `${changed ? "Pinned" : "Already active"} ${kind}: "${params.name}"${priority === "high" ? " (HIGH)" : ""}\n\n${xml}\n\n---\n${preview}`,
+					text: t(changed ? "tool.pin.result.pinned" : "tool.pin.result.active", { kind, name: params.name, priority: priority === "high" ? t("tool.pin.priorityHigh") : "", xml, preview }),
 				}],
 			};
 		},

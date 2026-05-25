@@ -1,12 +1,12 @@
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
-import type { ExtensionConfig } from "./config.ts";
+import { DEFAULT_CONFIG, type ExtensionConfig } from "./config.ts";
+import { t } from "./i18n/index.ts";
 import { buildModelVisibleContext, extractModelVisibleMetadata, extractModelVisibleSection } from "./model-visible.ts";
 
 export const CONTEXT_RESULT_LOOKUP_TOOL = "context_result_lookup";
 export const CUSTOM_TYPE_HUGE_RESULT = "context-engine-huge-result";
-const MAX_INLINE_PREVIEW_CHARS = 2_000;
-const MAX_SNIPPET_LINES = 8;
+const MAX_SNIPPET_LINES = 4;
 
 export interface StoredResult {
 	ref: string;
@@ -82,13 +82,26 @@ export function extractToolResultText(content: unknown): string | undefined {
 }
 
 export function buildPreview(record: StoredResult, config: ExtensionConfig): string {
-	const headBudget = Math.min(config.hugeResultHeadChars, Math.floor(MAX_INLINE_PREVIEW_CHARS * 0.7));
-	const tailBudget = Math.min(config.hugeResultTailChars, Math.max(0, MAX_INLINE_PREVIEW_CHARS - headBudget));
-	const head = firstLines(record.text.slice(0, headBudget), MAX_SNIPPET_LINES);
-	const tail = tailBudget > 0 ? lastLines(record.text.slice(-tailBudget), Math.max(2, Math.floor(MAX_SNIPPET_LINES / 2))) : "";
+	const segmentChars = configuredPositiveInt(config.hugeResultChars, DEFAULT_CONFIG.hugeResultChars);
+	const configuredHeadBudget = configuredNonNegativeInt(config.hugeResultHeadChars, DEFAULT_CONFIG.hugeResultHeadChars);
+	const configuredTailBudget = configuredNonNegativeInt(config.hugeResultTailChars, DEFAULT_CONFIG.hugeResultTailChars);
+	const headBudget = Math.min(configuredHeadBudget, segmentChars);
+	const tailBudget = Math.min(configuredTailBudget, Math.max(0, segmentChars - headBudget));
+	const fullPreviewFits = record.text.length <= headBudget + tailBudget;
+	const head = fullPreviewFits ? record.text : firstLines(record.text.slice(0, headBudget), MAX_SNIPPET_LINES);
+	const tail = !fullPreviewFits && tailBudget > 0 ? lastLines(record.text.slice(-tailBudget), Math.max(2, Math.floor(MAX_SNIPPET_LINES / 2))) : "";
+	const visibleChars = fullPreviewFits ? record.text.length : head.length + tail.length;
+	const fullResultFitsConfig = record.text.length <= segmentChars;
 	return buildModelVisibleContext({
 		kind: "context_result_truncated",
 		ui: "custom-rendered",
+		instructions: buildModelInstruction(record, {
+			fullResultFitsConfig,
+			headChars: head.length,
+			tailChars: tail.length,
+			visibleChars,
+			segmentChars,
+		}),
 		metadata: {
 			reason: "tool_output_exceeds_huge_result_limit",
 			original_bytes: record.bytes,
@@ -99,7 +112,7 @@ export function buildPreview(record: StoredResult, config: ExtensionConfig): str
 			ref_label: `[ref ${record.ref}]`,
 			recovery: {
 				tool: CONTEXT_RESULT_LOOKUP_TOOL,
-				arguments: { ref: record.ref, offset: 0, limit: record.bytes },
+				arguments: { ref: record.ref, offset: 0, limit: segmentChars },
 			},
 		},
 		sections: [
@@ -107,6 +120,30 @@ export function buildPreview(record: StoredResult, config: ExtensionConfig): str
 			{ name: "preview", content: [head, tail ? "\n…\n" : "", tail].join("\n") },
 		],
 	});
+}
+
+function buildModelInstruction(record: StoredResult, segment: { fullResultFitsConfig: boolean; headChars: number; tailChars: number; visibleChars: number; segmentChars: number }): string {
+	const subject = /^(read|cat|file|context_parallel_read|deepseek_cache_parallel_read)$/i.test(record.toolName ?? "") ? "file" : "tool output";
+	const totalSegments = Math.max(1, Math.ceil(record.text.length / segment.segmentChars));
+	if (segment.fullResultFitsConfig) {
+		return [
+			`This is the complete ${subject} (${record.bytes} bytes); no other segments exist.`,
+			`Stored ref ${record.ref} may be used later to revisit the same content.`,
+			`Do not call ${CONTEXT_RESULT_LOOKUP_TOOL} unless you need to quote or re-check this exact result.`,
+		].join(" ");
+	}
+	const omittedChars = Math.max(0, record.text.length - segment.visibleChars);
+	const shape = segment.tailChars > 0
+		? `shown excerpt has ${segment.headChars} head chars and ${segment.tailChars} tail chars; about ${omittedChars} chars in the middle are not shown`
+		: `shown excerpt has ${segment.headChars} head chars; about ${omittedChars} chars after it are not shown`;
+	const nextOffset = Math.min(segment.segmentChars, record.text.length);
+	const remainingSegments = Math.max(0, totalSegments - 1);
+	return [
+		`This is segment 1/${totalSegments} of a ${record.bytes}-byte ${subject}; configured segment size is ${segment.segmentChars} chars.`,
+		`${shape}.`,
+		`Next segment: call ${CONTEXT_RESULT_LOOKUP_TOOL} with ref="${record.ref}", offset=${nextOffset}, limit=${segment.segmentChars}; ${remainingSegments} segment(s) remain.`,
+		"Do not claim facts about unseen ranges until you fetch them; you may also refer to this ref later.",
+	].join(" ");
 }
 
 export function isHugeResultPreview(result: any): boolean {
@@ -188,17 +225,17 @@ function lastLines(text: string, maxLines: number): string {
 export function registerLookupTool(pi: any, store: HugeResultStore): void {
 	pi.registerTool?.({
 		name: CONTEXT_RESULT_LOOKUP_TOOL,
-		label: "context result lookup",
-		description: "Retrieve full tool output elided by pi-context-engine huge-result capper.",
-		promptSnippet: "Retrieve full tool output elided by pi-context-engine huge-result capper.",
+		label: t("tool.lookup.label"),
+		description: t("tool.lookup.description"),
+		promptSnippet: t("tool.lookup.promptSnippet"),
 		parameters: Type.Object({
-			ref: Type.String({ description: "Reference like dsc-1." }),
-			offset: Type.Optional(Type.Number({ description: "Start character offset within the stored result." })),
-			limit: Type.Optional(Type.Number({ description: "Maximum number of characters to return." })),
+			ref: Type.String({ description: t("tool.lookup.param.ref") }),
+			offset: Type.Optional(Type.Number({ description: t("tool.lookup.param.offset") })),
+			limit: Type.Optional(Type.Number({ description: t("tool.lookup.param.limit") })),
 		}),
 		async execute(_toolCallId: string, params: { ref: string; offset?: number; limit?: number }) {
 			const record = store.get(params.ref);
-			if (!record) return { content: [{ type: "text", text: `Ref not found: ${params.ref}` }], details: { ref: params.ref, found: false } };
+			if (!record) return { content: [{ type: "text", text: t("tool.lookup.notFound", { ref: params.ref }) }], details: { ref: params.ref, found: false } };
 			const offset = Math.max(0, Math.floor(params.offset ?? 0));
 			const limit = params.limit === undefined ? undefined : Math.max(0, Math.floor(params.limit));
 			const text = limit === undefined ? record.text.slice(offset) : record.text.slice(offset, offset + limit);
@@ -255,9 +292,18 @@ export function maybeCapToolResult(event: any, config: ExtensionConfig, store: H
 	const text = extractToolResultText(event?.content);
 	if (!text) return undefined;
 	const bytes = Buffer.byteLength(text);
-	if (bytes < config.hugeResultChars) return undefined;
+	const threshold = configuredPositiveInt(config.hugeResultChars, DEFAULT_CONFIG.hugeResultChars);
+	if (text.length <= threshold) return undefined;
 	const record = store.remember(text, event?.toolCallId, event?.toolName);
 	return { content: [{ type: "text", text: buildPreview(record, config) }], details: { elidedBy: "pi-context-engine", ref: record.ref, bytes } };
+}
+
+function configuredPositiveInt(value: unknown, fallback: number): number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback;
+}
+
+function configuredNonNegativeInt(value: unknown, fallback: number): number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }
 
 function isContextResultLookupEvent(event: any): boolean {

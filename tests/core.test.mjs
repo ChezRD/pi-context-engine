@@ -2,20 +2,25 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { detectDeepSeekModel } from "../src/model.ts";
-import { emptyStats, addUsage, cacheSavingsUsd, computeHitRatio, costToCompact, deepSeekOfficialCost, extractUsageSnapshot, hitRatio, savingsFromRealCost, aggregateByModel, aggregateBySegment, currentSegmentStats, warmHitRate } from "../src/stats.ts";
+import { emptyStats, addUsage, cacheSavingsUsd, computeHitRatio, costToCompact, deepSeekOfficialCost, extractUsageSnapshot, formatRatio, formatTokenCount, hitRatio, savingsFromRealCost, aggregateByModel, aggregateBySegment, currentSegmentStats, warmHitRate, markCompaction } from "../src/stats.ts";
 import { inspectProviderPayload } from "../src/payload-diagnostics.ts";
 import { parseConfig, DEFAULT_CONFIG } from "../src/config.ts";
 import { createRuntimeState } from "../src/runtime-state.ts";
 import { syncModelSelection } from "../src/index.ts";
+import { applyLocale, t } from "../src/i18n/index.ts";
 import { classifyPruner, detectPruner } from "../src/pruner-advisor.ts";
 import { getContextPercent, recommendContextAction } from "../src/context-monitor.ts";
 import { CUSTOM_TYPE_HUGE_RESULT, HugeResultStore, buildPreview, maybeCapToolResult, persistHugeResult, registerLookupTool, renderStoredHugeResult, restoreHugeResultsFromSession } from "../src/capper.ts";
 import { MODEL_VISIBLE_CONTEXT_MARKER, MODEL_VISIBLE_CONTEXT_SCHEMA } from "../src/model-visible.ts";
 import { estimateTokens, maybeAdjustCutForCache, simpleHash } from "../src/cache-engine/custom-compaction.ts";
 import { openCacheCheckpoint, currentCacheSegment, annotateUsageForCurrentSegment } from "../src/cache-engine/cache-checkpoints.ts";
-import { canCompactNow, decideCompaction, detectTextualToolCall, diffPrefix, extractCachePrefix, handleProviderPrefix, handleToolCall, normalizeTools, registerParallelReadTool, shouldNotifyPrefixDrift, stableHash } from "../src/cache-engine/index.ts";
-import { CUSTOM_TYPE_TELEMETRY, restoreTelemetryFromSession } from "../src/telemetry-persistence.ts";
+import { canCompactNow, decideCompaction, detectTextualToolCall, diffPrefix, extractCachePrefix, handleContext, handleMessageEnd, handleProviderPrefix, handleSessionBeforeCompact, handleToolCall, handleTurnEnd, normalizeTools, registerParallelReadTool, shouldNotifyPrefixDrift, stableHash } from "../src/cache-engine/index.ts";
+import { decideAfterUsage, estimateTurnStart, readContextUsage, zoneForRatio } from "../src/cache-engine/decision-engine.ts";
+import { CUSTOM_TYPE_PRUNE_DEBUG, CUSTOM_TYPE_TELEMETRY, restoreTelemetryFromSession } from "../src/telemetry-persistence.ts";
 import { pruneMessages } from "../src/projection/pruner.ts";
+import { rebuildPrunedContextFromSession } from "../src/projection/rebuild.ts";
+import { executePrune, registerPruneTool, syncPruneToolActivation } from "../src/projection/prune-tool.ts";
+import { captureTurnEndBatch } from "../src/projection/batch-capture.ts";
 
 test("detects built-in DeepSeek model as native", () => {
   const result = detectDeepSeekModel({
@@ -45,6 +50,21 @@ test("computes cache stats from Pi usage", () => {
   assert.equal(hitRatio(stats.input, stats.cacheRead), 0.9);
 });
 
+test("usage snapshot extraction handles sparse, invalid, and nested shapes", () => {
+  const cacheOnly = extractUsageSnapshot({ id: "req-1", usage: { cacheRead: 42, cost: { total: 0.01 } } });
+  assert.equal(cacheOnly.cacheRead, 42);
+  assert.equal(cacheOnly.hitRate, 1);
+  assert.equal(cacheOnly.cost, 0.01);
+  assert.equal(cacheOnly.requestId, "req-1");
+
+  assert.equal(extractUsageSnapshot({ usage: { input: -1, output: 0 } }), undefined);
+  assert.equal(extractUsageSnapshot({ usage: [] }), undefined);
+  assert.equal(extractUsageSnapshot({ usage: null }), undefined);
+
+  const preferred = extractUsageSnapshot({ usage: { input: 5 }, message: { usage: { input: 99 } } });
+  assert.equal(preferred.input, 5);
+});
+
 test("no-cache savings display is UX-only and non-negative", () => {
   const usage = { input: 1000, cacheRead: 0, cacheWrite: 0, output: 100, cost: 1 };
   assert.equal(savingsFromRealCost(usage, { input: 0.14, output: 0.28, cacheRead: 0.0028 }), 0);
@@ -54,6 +74,69 @@ test("no-cache savings display is UX-only and non-negative", () => {
   assert.equal(stats.last.savings, 0);
   assert.equal(snap.cost, 1);
   assert.equal(usage.cost, 1);
+});
+
+test("stats helpers cover pricing, ratios, formatting, grouping, compaction, and compact cost edge cases", () => {
+  assert.deepEqual(deepSeekOfficialCost("deepseek-reasoner"), deepSeekOfficialCost("deepseek-v4-flash"));
+  assert.deepEqual(deepSeekOfficialCost("deepseek-chat"), deepSeekOfficialCost("deepseek-v4-flash"));
+  assert.deepEqual(deepSeekOfficialCost("DeepSeek-V4-Flash"), deepSeekOfficialCost("deepseek-v4-flash"));
+  assert.equal(deepSeekOfficialCost(null), undefined);
+  assert.equal(deepSeekOfficialCost("mixtral-8x7b"), undefined);
+
+  assert.equal(hitRatio(100, 0), 0);
+  assert.equal(hitRatio(0, 2, 0), 1);
+  assert.equal(computeHitRatio(0, 0, 0), 0);
+  assert.equal(formatRatio(undefined), "n/a");
+  assert.equal(formatRatio(0), "0.0%");
+  assert.equal(formatRatio(0.756), "75.6%");
+  assert.equal(formatTokenCount(500), "500");
+  assert.equal(formatTokenCount(1500), "1.5k");
+  assert.equal(formatTokenCount(1500000), "1.5M");
+  assert.equal(formatTokenCount(0), "0");
+
+  const modelSummaries = aggregateByModel([
+    { input: 10, cacheRead: 10, cacheWrite: 0, output: 1, actualCost: 1, noCacheCost: 2, savings: 1, modelCost: { input: 1, output: 1 }, provider: "deepseek" },
+    { input: 10, cacheRead: 0, cacheWrite: 0, output: 1, actualCost: 1, noCacheCost: 2, savings: 1 },
+    { input: 0, cacheRead: 5, cacheWrite: 0, output: 1, actualCost: 1, modelId: "m2", provider: "fallback" },
+  ]);
+  const unknown = modelSummaries.find((summary) => summary.modelId === "unknown");
+  assert.equal(unknown.provider, "deepseek");
+  assert.equal(unknown.pricingKnown, true);
+  assert.equal(unknown.noCacheCost, 4);
+  assert.equal(unknown.savings, 2);
+  assert.equal(modelSummaries.find((summary) => summary.modelId === "m2").pricingKnown, false);
+
+  const segmentSummaries = aggregateBySegment([
+    { input: 10, cacheRead: 0, cacheWrite: 0, output: 1, actualCost: 1, segmentId: "s1", warmup: true },
+    { input: 0, cacheRead: 10, cacheWrite: 0, output: 1, actualCost: 1, segmentId: "s1", warmup: false },
+    { input: 5, cacheRead: 5, cacheWrite: 0, output: 1, actualCost: 1 },
+  ]);
+  const s1 = segmentSummaries.find((summary) => summary.segmentId === "s1");
+  assert.equal(s1.warmupRequests, 1);
+  assert.equal(s1.warmHitRate, 1);
+  assert.equal(segmentSummaries.find((summary) => summary.segmentId === "unknown").requests, 1);
+
+  assert.deepEqual(markCompaction({ ...emptyStats(), compacts: undefined }).compacts, []);
+  assert.equal(markCompaction(emptyStats()).sinceCompactionRequests, 0);
+
+  const pricing = { input: 1, cacheRead: 0.1, cacheWrite: 0, output: 2 };
+  assert.equal(costToCompact(undefined, pricing), 0);
+  assert.equal(costToCompact({ input: 100, cacheRead: 0, cacheWrite: 0 }, undefined), 0);
+  assert.equal(costToCompact({ input: 100, cacheRead: 100, cacheWrite: 0 }, pricing), 0.00009);
+});
+
+test("addUsage handles missing snapshots, explicit costs, and missing compacts", () => {
+  const base = { ...emptyStats(), compacts: undefined };
+  assert.equal(addUsage(base, undefined), base);
+
+  const withModelCost = addUsage(base, { input: 1000, cacheRead: 0, cacheWrite: 0, output: 0, modelCost: { input: 1, cacheRead: 0.1, cacheWrite: 0, output: 2 }, createdAt: 1 });
+  assert.equal(withModelCost.requests, 1);
+  assert.equal(withModelCost.cost, 0.001);
+  assert.deepEqual(withModelCost.compacts, []);
+
+  const withProviderCost = addUsage(emptyStats(), { input: 1000, cacheRead: 0, cacheWrite: 0, output: 0, cost: 0.123, createdAt: 1 }, "custom-model", { input: 1, output: 2 });
+  assert.equal(withProviderCost.cost, 0.123);
+  assert.equal(withProviderCost.last.actualCost, 0.123);
 });
 
 test("inspects DeepSeek provider payload", () => {
@@ -76,6 +159,66 @@ test("config parser accepts percent in 0..100 form", () => {
   assert.equal(config.contextWarnPct, 0.6);
   assert.equal(config.hugeResultCapper, true);
   assert.equal(config.dynamicProviderName, DEFAULT_CONFIG.dynamicProviderName);
+});
+
+test("config parser falls back and clamps invalid edge values", () => {
+  for (const value of ["x", 1, [], null]) {
+    assert.deepEqual(parseConfig(value), DEFAULT_CONFIG);
+  }
+
+  const empty = parseConfig({});
+  assert.deepEqual(empty, DEFAULT_CONFIG);
+
+  const parsed = parseConfig({
+    enabled: "no",
+    pruneOn: "invalid-value",
+    pruneBatchSize: 999,
+    pruneBridgeLength: 0,
+    hugeResultChars: 500,
+    statusBarStyle: "charts",
+    minTurnsBetweenCompacts: -5,
+    maxCompactsPerSession: 0,
+    foldTimeoutMs: 50,
+    skillPinConfirmThreshold: 0,
+    foldThreshold: 150,
+    contextFoldPct: 70,
+  });
+  assert.equal(parsed.enabled, DEFAULT_CONFIG.enabled);
+  assert.equal(parsed.pruneOn, DEFAULT_CONFIG.pruneOn);
+  assert.equal(parsed.pruneBatchSize, 20);
+  assert.equal(parsed.pruneBridgeLength, 1);
+  assert.equal(parsed.hugeResultChars, DEFAULT_CONFIG.hugeResultChars);
+  assert.equal(parsed.statusBarStyle, DEFAULT_CONFIG.statusBarStyle);
+  assert.equal(parsed.minTurnsBetweenCompacts, DEFAULT_CONFIG.minTurnsBetweenCompacts);
+  assert.equal(parsed.maxCompactsPerSession, DEFAULT_CONFIG.maxCompactsPerSession);
+  assert.equal(parsed.foldTimeoutMs, DEFAULT_CONFIG.foldTimeoutMs);
+  assert.equal(parsed.skillPinConfirmThreshold, DEFAULT_CONFIG.skillPinConfirmThreshold);
+  assert.equal(parsed.foldThreshold, 1.5);
+  assert.equal(parsed.contextCompactPct, 0.7);
+
+  const minValues = parseConfig({ pruneBatchSize: 0, pruneBridgeLength: 1, minTurnsBetweenCompacts: 0, foldTimeoutMs: 100, skillPinConfirmThreshold: 1 });
+  assert.equal(minValues.pruneBatchSize, 1);
+  assert.equal(minValues.pruneBridgeLength, 1);
+  assert.equal(minValues.minTurnsBetweenCompacts, 0);
+  assert.equal(minValues.foldTimeoutMs, 100);
+  assert.equal(minValues.skillPinConfirmThreshold, 1);
+});
+
+test("config parser preserves all boolean fields", () => {
+  const boolKeys = [
+    "enabled", "diagnostics", "mutateSystemPrompt", "mutateProviderPayload", "registerDynamicProvider",
+    "allowOverrideBuiltInDeepSeek", "hugeResultCapper", "prefixStabilityCheck", "prefixFingerprint",
+    "toolFingerprint", "appendOnlyProjection", "autoCompactAtHighWatermark", "enableAgenticTools",
+    "pruneEnabled", "pruneIncludeContext", "autoFold", "foldTool", "cachePromptInjection",
+    "showCostSavings", "showCostBreakdown", "showSavings", "strictPrefixWarnings", "parallelReadTool",
+    "statusLine", "persistDiagnostics", "checkpointStartsSegment", "skillPinning", "memoryInjection",
+    "priorityInjection", "reasonixCompatibilityRoots", "autoDetectSkillPins", "autoPinFrequentSkills",
+  ];
+  const allFalse = Object.fromEntries(boolKeys.map((key) => [key, false]));
+  const allTrue = Object.fromEntries(boolKeys.map((key) => [key, true]));
+
+  for (const key of boolKeys) assert.equal(parseConfig(allFalse)[key], false, key);
+  for (const key of boolKeys) assert.equal(parseConfig(allTrue)[key], true, key);
 });
 
 
@@ -108,6 +251,45 @@ test("context percent and recommendations", () => {
   assert.equal(rec.level, "danger");
 });
 
+test("decision engine reads context usage shapes and boundary zones", () => {
+  assert.deepEqual(readContextUsage({ getContextUsage: () => ({ promptTokens: 500, maxTokens: 1000 }) }), { ratio: 0.5, tokens: 500, max: 1000 });
+  assert.deepEqual(readContextUsage({ getContextUsage: () => ({ tokens: 500, ctxMax: 1000 }) }), { ratio: 0.5, tokens: 500, max: 1000 });
+  assert.equal(readContextUsage({ getContextUsage: () => ({ percent: 75 }) }).ratio, 0.75);
+  assert.equal(readContextUsage({ getContextUsage: () => ({ pct: 0.55 }) }).ratio, 0.55);
+  assert.equal(readContextUsage({ getContextUsage: () => ({ ratio: 0.8 }) }).ratio, 0.8);
+  assert.deepEqual(readContextUsage({ getContextUsage: () => ({ usedTokens: 200, limit: 1000 }) }), { ratio: 0.2, tokens: 200, max: 1000 });
+  assert.deepEqual(readContextUsage({ getContextUsage: () => ({ contextTokens: 300 }) }), { ratio: undefined, tokens: 300, max: undefined });
+  assert.deepEqual(readContextUsage({ getContextUsage: () => ({ percent: 2 }) }), { ratio: 0.02, tokens: undefined, max: undefined });
+  assert.equal(readContextUsage({ getContextUsage: () => ({ percent: 0.5 }) }).ratio, 0.5);
+  assert.deepEqual(readContextUsage({ getContextUsage: () => ({ promptTokens: "abc", tokens: Infinity }) }), { ratio: undefined, tokens: undefined, max: undefined });
+  assert.deepEqual(readContextUsage({ getContextUsage: () => null }), {});
+  assert.deepEqual(readContextUsage({ getContextUsage: () => "bad" }), {});
+
+  assert.equal(zoneForRatio(0.4, DEFAULT_CONFIG), "green");
+  assert.equal(zoneForRatio(0.6, DEFAULT_CONFIG), "yellow");
+  assert.equal(zoneForRatio(0.72, DEFAULT_CONFIG), "orange");
+  assert.equal(zoneForRatio(0.82, DEFAULT_CONFIG), "red");
+  assert.equal(zoneForRatio(0.95, DEFAULT_CONFIG), "critical");
+  assert.equal(zoneForRatio(undefined, DEFAULT_CONFIG), "green");
+  assert.equal(zoneForRatio(0, DEFAULT_CONFIG), "green");
+
+  assert.equal(decideCompaction({ ratio: 0 }, DEFAULT_CONFIG), "hold");
+  assert.equal(decideCompaction({ ratio: undefined }, DEFAULT_CONFIG), "hold");
+  assert.equal(decideCompaction({ ratio: 0.75, hitRate: 0.3 }, DEFAULT_CONFIG), "fold");
+  assert.equal(decideCompaction({ ratio: 0.71, hitRate: 0 }, DEFAULT_CONFIG), "hold");
+});
+
+test("post-usage and preflight decisions cover invalid and exact threshold inputs", () => {
+  assert.deepEqual(decideAfterUsage(undefined, undefined, false, DEFAULT_CONFIG), { kind: "none", promptTokens: 0, ctxMax: 0, ratio: 0 });
+  assert.deepEqual(decideAfterUsage(10, -1, false, DEFAULT_CONFIG), { kind: "none", promptTokens: 10, ctxMax: -1, ratio: 0 });
+  assert.equal(decideAfterUsage(75, 100, false, DEFAULT_CONFIG).kind, "fold");
+  assert.equal(decideAfterUsage(78, 100, false, DEFAULT_CONFIG).aggressive, true);
+  assert.equal(decideAfterUsage(80, 100, false, DEFAULT_CONFIG).kind, "exit-with-summary");
+  assert.equal(estimateTurnStart({ getContextUsage: () => ({ ratio: 0.91 }) }, DEFAULT_CONFIG).shouldFold, true);
+  assert.equal(estimateTurnStart({ getContextUsage: () => ({ ratio: 0.89 }) }, DEFAULT_CONFIG).shouldFold, false);
+  assert.deepEqual(estimateTurnStart({}, DEFAULT_CONFIG), { shouldFold: false, ratio: 0 });
+});
+
 test("model selection drift opens checkpoint segment with previous model", () => {
   const state = createRuntimeState({ model: { provider: "deepseek", id: "deepseek-v4-flash" } });
   state.stats.requests = 1;
@@ -123,6 +305,19 @@ test("model selection drift opens checkpoint segment with previous model", () =>
   assert.equal(checkpoint.previousModelId, "deepseek-v4-flash");
   assert.equal(checkpoint.modelId, "deepseek-r1");
   assert.equal(state.engine.segments.at(-1).checkpointId, checkpoint.id);
+});
+
+test("syncModelSelection leaves checkpoints unchanged for same model and for first requestless selection", () => {
+  const state = createRuntimeState({ model: { provider: "deepseek", id: "deepseek-v4-flash" } });
+  const checkpointCount = state.engine.checkpoints.length;
+
+  syncModelSelection({ model: { provider: "deepseek", id: "deepseek-v4-flash" } }, state);
+  assert.equal(state.engine.checkpoints.length, checkpointCount);
+
+  syncModelSelection({ model: { provider: "openrouter", id: "deepseek-v4-pro" } }, state);
+  assert.equal(state.engine.checkpoints.length, checkpointCount);
+  assert.equal(state.detection.modelId, "deepseek-v4-pro");
+  assert.equal(state.detection.provider, "openrouter");
 });
 
 test("telemetry restore rebuilds prune indexer for provider-context pruning after reload", () => {
@@ -141,7 +336,549 @@ test("telemetry restore rebuilds prune indexer for provider-context pruning afte
     { role: "tool", toolCallId: "tc-2", content: "large 2" },
   ], restored.toolIndexer);
   assert.equal(pruned.length, 1);
-  assert.match(pruned[0].content, /batch summary/);
+  assert.equal(pruned[0].role, "assistant");
+});
+
+test("context handler returns pruned messages so Pi standard context usage sees the rebuilt context", async () => {
+  const state = createRuntimeState();
+  state.toolIndexer.markSummarized("tc-1", "read", 1, "summary");
+  const event = {
+    messages: [
+      { role: "assistant", tool_calls: [{ id: "tc-1", function: { name: "read", arguments: "{}" } }] },
+      { role: "toolResult", toolCallId: "tc-1", content: [{ type: "text", text: "large result" }] },
+    ],
+  };
+
+  const result = await handleContext(event, {}, state);
+
+  assert.ok(result);
+  assert.equal(result.messages.length, 1);
+  assert.equal(result.messages[0].role, "assistant");
+});
+
+test("context handler projects semantic fold synthetic message plus live tail from branch", async () => {
+  const state = createRuntimeState();
+  state.engine.semanticFold.active = true;
+  state.engine.semanticFold.syntheticMsg = { role: "assistant", content: "folded summary" };
+  state.engine.semanticFold.tailStartEntryId = "tail-1";
+  const result = await handleContext(
+    { messages: [{ role: "system", content: "sys" }, { role: "user", content: "live tail should be ignored here" }] },
+    {
+      sessionManager: {
+        getBranch: async () => [
+          { id: "tail-2", message: { role: "assistant", content: "tail assistant" } },
+          { id: "tail-1", message: { role: "user", content: "tail user" } },
+          { id: "older", message: { role: "user", content: "old" } },
+        ],
+      },
+    },
+    state,
+  );
+
+  assert.deepEqual(result.messages, [
+    { role: "system", content: "sys" },
+    { role: "assistant", content: "folded summary" },
+    { role: "user", content: "tail user" },
+    { role: "assistant", content: "tail assistant" },
+  ]);
+});
+
+test("context handler returns undefined when nothing changed and no projection applies", async () => {
+  const state = createRuntimeState();
+  const result = await handleContext({ messages: [{ role: "system", content: "sys" }] }, {}, state);
+  assert.equal(result, undefined);
+});
+
+test("context handler returns only system plus synthetic message when semantic fold tail start is missing", async () => {
+  const state = createRuntimeState();
+  state.engine.semanticFold.active = true;
+  state.engine.semanticFold.syntheticMsg = { role: "assistant", content: "folded summary" };
+  state.engine.semanticFold.tailStartEntryId = "missing-tail";
+  const result = await handleContext(
+    { messages: [{ role: "system", content: "sys" }, { role: "user", content: "ignored" }] },
+    { sessionManager: { getBranch: async () => [{ id: "other", message: { role: "user", content: "old tail" } }] } },
+    state,
+  );
+
+  assert.deepEqual(result.messages, [
+    { role: "system", content: "sys" },
+    { role: "assistant", content: "folded summary" },
+  ]);
+});
+
+test("context handler falls through safely when semantic fold branch lookup throws", async () => {
+  const state = createRuntimeState();
+  state.engine.semanticFold.active = true;
+  state.engine.semanticFold.syntheticMsg = { role: "assistant", content: "folded summary" };
+  const result = await handleContext(
+    { messages: [{ role: "system", content: "sys" }] },
+    { sessionManager: { getBranch: async () => { throw new Error("boom"); } } },
+    state,
+  );
+  assert.deepEqual(result.messages, [
+    { role: "system", content: "sys" },
+    { role: "assistant", content: "folded summary" },
+  ]);
+});
+
+test("context handler returns append-only projection when active", async () => {
+  const state = createRuntimeState();
+  state.config.appendOnlyProjection = true;
+  state.engine.appendOnly.projectionActive = true;
+  state.engine.appendOnly.stableSummary = { role: "assistant", content: "stable summary" };
+  const result = await handleContext(
+    {
+      messages: [
+        { role: "system", content: "sys" },
+        { id: "e1", role: "user", content: "tail user" },
+      ],
+    },
+    { ui: { notify: () => {} } },
+    state,
+  );
+
+  assert.deepEqual(result.messages, [
+    { role: "system", content: "sys" },
+    { role: "assistant", content: "stable summary" },
+    { id: "e1", role: "user", content: "tail user" },
+  ]);
+});
+
+test("manual prune rebuild opens prune checkpoint exactly once for newly applied ids", async () => {
+  const state = createRuntimeState();
+  state.toolIndexer.markSummarized("tc-1", "read", 1, "summary");
+  const ctx = {
+    sessionManager: {
+      getBranch: () => [
+        { type: "message", message: { role: "assistant", tool_calls: [{ id: "tc-1" }] } },
+        { type: "message", message: { role: "toolResult", toolCallId: "tc-1", content: "large result" } },
+      ],
+    },
+  };
+
+  const first = await rebuildPrunedContextFromSession(ctx, state, "manual test");
+  const checkpointCount = state.engine.checkpoints.length;
+
+  assert.equal(first.changed, true);
+  assert.equal(first.newlyApplied.length, 1);
+  assert.equal(first.checkpointOpened, true);
+  assert.equal(state.engine.prune.pruneRunCount, 1);
+  assert.equal(state.engine.checkpoints.at(-1).reason, "prune");
+  assert.equal(state.engine.segments.at(-1).checkpointId, state.engine.checkpoints.at(-1).id);
+
+  const second = await rebuildPrunedContextFromSession(ctx, state, "manual test");
+  assert.equal(second.checkpointOpened, false);
+  assert.equal(state.engine.prune.pruneRunCount, 1);
+  assert.equal(state.engine.checkpoints.length, checkpointCount);
+});
+
+test("executePrune reports noneSummarized when summary model returns no usable output", async () => {
+  const state = createRuntimeState();
+  state.config.diagnostics = true;
+  state.config.persistDiagnostics = true;
+  const originalLang = process.env.LANG;
+  try {
+    process.env.LANG = "ru_RU.UTF-8";
+    applyLocale(undefined);
+    const entries = [];
+    let completeOptions;
+    const pi = {
+      appendEntry: (customType, data) => entries.push({ type: "custom", customType, data }),
+      complete: async (_model, _messages, options) => {
+        completeOptions = options;
+        return { content: [{ type: "text", text: "" }] };
+      },
+    };
+    const ctx = {
+      sessionManager: {
+        getBranch: () => [
+          { type: "message", message: { role: "assistant", tool_calls: [{ id: "tc-1", function: { name: "read", arguments: "{}" } }] } },
+          { type: "message", message: { role: "toolResult", toolCallId: "tc-1", content: "large result" } },
+        ],
+      },
+    };
+
+    const result = await executePrune(pi, ctx, state.toolIndexer, state, "auto");
+
+    assert.equal(result.details.reason, "none_summarized");
+    assert.equal(result.details.summarized, 0);
+    assert.equal(result.details.attempted, 1);
+    assert.equal(result.details.summaryRequests, 1);
+    assert.equal(result.details.error, "summary response was empty");
+    assert.equal(completeOptions.reasoningEffort, undefined);
+    assert.match(state.engine.prune.impact.lastSummarizePrompt, /Input JSON:/);
+    assert.match(state.engine.prune.impact.lastSummarizePrompt, /"payload_kind": "tool_call_batches_v2"/);
+    assert.equal(state.engine.prune.impact.lastSummarizeResponse, "");
+    assert.equal(state.engine.prune.impact.lastError, "summary response was empty");
+    assert.equal(entries.some((entry) => entry.customType === CUSTOM_TYPE_PRUNE_DEBUG && entry.data.error === "summary response was empty"), true);
+    assert.equal(entries.some((entry) => entry.customType === CUSTOM_TYPE_TELEMETRY), true);
+    assert.equal(result.text, t("tool.prune.noneSummarized"));
+  } finally {
+    process.env.LANG = originalLang;
+    applyLocale(undefined);
+  }
+});
+
+test("executePrune returns no_session without session manager", async () => {
+  const result = await executePrune({}, {}, createRuntimeState().toolIndexer);
+  assert.equal(result.details.reason, "no_session");
+  assert.equal(result.text, t("tool.prune.error.noSession"));
+});
+
+test("executePrune marks tool calls with missing replayable results and persists skipped ids", async () => {
+  const state = createRuntimeState();
+  const result = await executePrune(
+    { appendEntry: () => {} },
+    {
+      sessionManager: {
+        getBranch: () => [
+          { type: "message", message: { role: "assistant", tool_calls: [{ id: "tc-missing", function: { name: "read", arguments: "{}" } }] } },
+          { type: "message", message: { role: "toolResult", toolCallId: "tc-missing", content: "" } },
+        ],
+      },
+    },
+    state.toolIndexer,
+    state,
+    "auto",
+  );
+
+  assert.equal(result.details.reason, "missing_tool_results");
+  assert.equal(result.details.missingResults, 1);
+  assert.equal(result.details.summaryRequests, 0);
+  assert.equal(state.engine.prune.skippedMissingResultIds.includes("tc-missing"), true);
+  assert.equal(state.engine.prune.impact.lastError, "missing_tool_results");
+});
+
+test("executePrune interactive mode lists replayable tool calls without summarizing", async () => {
+  const state = createRuntimeState();
+  let completeCalled = false;
+  const result = await executePrune(
+    { complete: async () => { completeCalled = true; } },
+    {
+      sessionManager: {
+        getBranch: () => [
+          { type: "message", message: { role: "assistant", tool_calls: [{ id: "tc-1", function: { name: "read", arguments: "{}" } }] } },
+          { type: "message", message: { role: "toolResult", toolCallId: "tc-1", content: "file contents" } },
+        ],
+      },
+    },
+    state.toolIndexer,
+    state,
+    "interactive",
+  );
+
+  assert.equal(completeCalled, false);
+  assert.equal(result.details.toolCalls.length, 1);
+  assert.match(result.text, /read\(tc-1\)/);
+});
+
+test("executePrune uses ctx model for default summarizer, deduplicates emitted summaries, and works without runtime engine", async () => {
+  const sent = [];
+  const pi = {
+    sendMessage: (message) => sent.push(message),
+    complete: async (model) => {
+      assert.equal(model, "deepseek-v4-flash");
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summaries: [
+              { batchIndex: 0, coverage: "complete", evidence: ["one"], summary: "same summary" },
+              { batchIndex: 1, coverage: "complete", evidence: ["one"], summary: "same summary" },
+            ],
+          }),
+        }],
+      };
+    },
+  };
+  const result = await executePrune(
+    pi,
+    {
+      model: { id: "deepseek-v4-flash" },
+      sessionManager: {
+        getBranch: () => [
+          { type: "message", turnIndex: 1, message: { role: "assistant", tool_calls: [{ id: "tc-1", function: { name: "read", arguments: "{}" } }] } },
+          { type: "message", turnIndex: 1, message: { role: "toolResult", toolCallId: "tc-1", content: "a".repeat(200) } },
+          { type: "message", turnIndex: 2, message: { role: "user", content: "next task" } },
+          { type: "message", turnIndex: 2, message: { role: "assistant", tool_calls: [{ id: "tc-2", function: { name: "grep", arguments: "{}" } }] } },
+          { type: "message", turnIndex: 2, message: { role: "toolResult", toolCallId: "tc-2", content: "b".repeat(200) } },
+        ],
+      },
+    },
+    createRuntimeState().toolIndexer,
+    { config: { pruneModel: "default", pruneIncludeContext: false } },
+    "auto",
+  );
+
+  assert.equal(result.details.summarized, 2);
+  assert.equal(result.details.modelId, "deepseek-v4-flash");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].customType, "context-engine-prune-summary");
+  assert.equal(sent[0].content, "Coverage: complete\nsame summary\n- Evidence: one");
+});
+
+test("executePrune uses explicit summarizer override and skips inefficient replacement summaries", async () => {
+  const state = createRuntimeState();
+  let usedModel;
+  const result = await executePrune(
+    {
+      complete: async (model) => {
+        usedModel = model;
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              summaries: [
+                { batchIndex: 0, coverage: "complete", evidence: ["one"], summary: "x".repeat(6000) },
+              ],
+            }),
+          }],
+        };
+      },
+      appendEntry: () => {},
+    },
+    {
+      sessionManager: {
+        getBranch: () => [
+          { type: "message", message: { role: "assistant", tool_calls: [{ id: "tc-oversized", function: { name: "read", arguments: "{}" } }] } },
+          { type: "message", message: { role: "toolResult", toolCallId: "tc-oversized", content: "small result" } },
+        ],
+      },
+    },
+    state.toolIndexer,
+    { ...state, config: { ...state.config, pruneModel: "custom-summarizer" } },
+    "auto",
+  );
+
+  assert.equal(usedModel, "custom-summarizer");
+  assert.equal(result.details.reason, "skipped_oversized");
+  assert.equal(result.details.skippedOversized, 1);
+});
+
+test("executePrune reports empty or malformed summarizer responses without marking tools summarized", async () => {
+  const variants = [
+    { name: "null", response: null, error: "summary model returned no response", requests: 1 },
+    { name: "undefined", response: undefined, error: "summary model returned no response", requests: 1 },
+    { name: "empty content array", response: { content: [] }, error: "summary response was empty", requests: 1 },
+    { name: "invalid JSON", response: { content: [{ type: "text", text: "{\"summaries\":[" }] }, error: "summary response did not contain usable structured summaries", requests: 1 },
+  ];
+
+  for (const variant of variants) {
+    const state = createRuntimeState();
+    const result = await executePrune(
+      { complete: async () => variant.response },
+      {
+        sessionManager: {
+          getBranch: () => [
+            { type: "message", message: { role: "assistant", tool_calls: [{ id: `tc-${variant.name}`, function: { name: "read", arguments: "{}" } }] } },
+            { type: "message", message: { role: "toolResult", toolCallId: `tc-${variant.name}`, content: "large result" } },
+          ],
+        },
+      },
+      state.toolIndexer,
+      state,
+      "auto",
+    );
+
+    assert.equal(result.details.reason, "none_summarized", variant.name);
+    assert.equal(result.details.summarized, 0, variant.name);
+    assert.equal(result.details.summaryRequests, variant.requests, variant.name);
+    assert.equal(result.details.error, variant.error, variant.name);
+    assert.equal(state.toolIndexer.isSummarized(`tc-${variant.name}`), false, variant.name);
+  }
+});
+
+test("agent-message prune collects on turn_end and flushes on final assistant message_end", async () => {
+  const state = createRuntimeState();
+  state.config.pruneEnabled = true;
+  state.config.pruneOn = "agent-message";
+  state.config.pruneBatchSize = 1;
+  state.config.pruneModel = "default";
+  let completeCalls = 0;
+  const pi = {
+    complete: async () => {
+      completeCalls++;
+      return { content: [{ type: "text", text: JSON.stringify({ summaries: [{ batchIndex: 0, summary: "data" }] }) }] };
+    },
+    appendEntry: () => {},
+    sendMessage: () => {},
+  };
+  const assistantWithTool = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "tc-agent-message", name: "read", input: { path: "x" } }],
+  };
+  const toolResult = {
+    role: "toolResult",
+    toolCallId: "tc-agent-message",
+    content: [{ type: "text", text: "important data" }],
+  };
+  const branch = [
+    { type: "message", message: assistantWithTool },
+    { type: "message", message: toolResult },
+  ];
+  const ctx = {
+    sessionManager: { getBranch: () => branch },
+    ui: { notify: () => {} },
+  };
+
+  await handleTurnEnd({ turnIndex: 1, message: assistantWithTool, toolResults: [toolResult] }, pi, ctx, state);
+
+  assert.equal(completeCalls, 0);
+  assert.equal(state.engine.prune.pendingBatches.length, 1);
+  assert.equal(state.engine.prune.awaitingAgentMessage, true);
+
+  await handleMessageEnd({ message: { role: "assistant", content: [{ type: "text", text: "done" }] } }, pi, ctx, state);
+
+  assert.equal(completeCalls, 1);
+  assert.equal(state.engine.prune.pendingBatches.length, 0);
+  assert.equal(state.engine.prune.batchStepCounter, 0);
+  assert.equal(state.engine.prune.awaitingAgentMessage, false);
+  assert.equal(state.engine.prune.summarizedIds.includes("tc-agent-message"), true);
+});
+
+test("handleTurnEnd uses event turnIndex when provided and increments otherwise", async () => {
+  const state = createRuntimeState();
+  state.config.enabled = false;
+  await handleTurnEnd({ turnIndex: 7 }, {}, {}, state);
+  assert.equal(state.engine.turnIndex, 7);
+  await handleTurnEnd({}, {}, {}, state);
+  assert.equal(state.engine.turnIndex, 8);
+});
+
+test("handleMessageEnd delegates safely for non-assistant events", async () => {
+  const state = createRuntimeState();
+  state.config.pruneEnabled = true;
+  state.config.pruneOn = "agent-message";
+  state.engine.prune.pendingBatches.push({ turnIndex: 1, toolCalls: [{ id: "tc-1", name: "read", turnIndex: 1, result: "x" }] });
+  await handleMessageEnd({ message: { role: "user", content: "not assistant" } }, {}, {}, state);
+  assert.equal(state.engine.prune.pendingBatches.length, 1);
+});
+
+test("captureTurnEndBatch preserves lookup details when restored session result body is empty", () => {
+  const pruneState = { pendingBatches: [] };
+  const count = captureTurnEndBatch(
+    {
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "lookup-1", name: "context_result_lookup", input: { ref: "dsc-x", offset: 12000, limit: 700 } }],
+      },
+      toolResults: [{
+        role: "toolResult",
+        toolCallId: "lookup-1",
+        toolName: "context_result_lookup",
+        content: [{ type: "text", text: "" }],
+        details: { ref: "dsc-x", offset: 12000, limit: 700, returnedChars: 0, bytes: 12666, found: true },
+      }],
+    },
+    [],
+    pruneState,
+    4,
+  );
+
+  assert.equal(count, 1);
+  assert.equal(pruneState.pendingBatches.length, 1);
+  assert.equal(pruneState.pendingBatches[0].toolCalls[0].result, "[context_result_lookup ref=dsc-x offset=12000 limit=700 returned=0 bytes=12666 found=true]");
+});
+
+test("captureTurnEndBatch deduplicates skip ids and already pending tool ids", () => {
+  const pruneState = {
+    pendingBatches: [{
+      turnIndex: 1,
+      toolCalls: [{ id: "pending-1", name: "read", turnIndex: 1, result: "existing result" }],
+    }],
+  };
+  const count = captureTurnEndBatch(
+    {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "skip-me", name: "read", input: { path: "a.ts" } },
+          { type: "toolCall", id: "pending-1", name: "read", input: { path: "b.ts" } },
+          { type: "toolCall", id: "fresh-1", name: "read", input: { path: "c.ts" } },
+        ],
+      },
+      toolResults: [
+        { role: "toolResult", toolCallId: "skip-me", content: "skip body" },
+        { role: "toolResult", toolCallId: "pending-1", content: "duplicate body" },
+        { role: "toolResult", toolCallId: "fresh-1", content: "fresh body" },
+      ],
+    },
+    ["skip-me"],
+    pruneState,
+    5,
+  );
+
+  assert.equal(count, 1);
+  assert.equal(pruneState.pendingBatches.length, 2);
+  assert.deepEqual(pruneState.pendingBatches[1].toolCalls.map((tc) => tc.id), ["fresh-1"]);
+});
+
+test("registerPruneTool wires tool execution through executePrune", async () => {
+  const state = createRuntimeState();
+  let registered;
+  registerPruneTool({ registerTool: (tool) => { registered = tool; } }, state.toolIndexer, state);
+  assert.equal(registered.name, "context_prune");
+
+  const result = await registered.execute(
+    "call-1",
+    { mode: "interactive" },
+    new AbortController().signal,
+    undefined,
+    {
+      sessionManager: {
+        getBranch: () => [
+          { type: "message", message: { role: "assistant", tool_calls: [{ id: "tc-1", function: { name: "read", arguments: "{}" } }] } },
+          { type: "message", message: { role: "toolResult", toolCallId: "tc-1", content: "x" } },
+        ],
+      },
+    },
+  );
+
+  assert.equal(result.content[0].type, "text");
+  assert.match(result.content[0].text, /read\(tc-1\)/);
+  assert.equal(result.details.toolCalls.length, 1);
+});
+
+test("syncPruneToolActivation adds and removes context_prune only for agentic-auto", () => {
+  const calls = [];
+  const pi = {
+    active: ["read"],
+    getActiveTools() { return [...this.active]; },
+    setActiveTools(next) { this.active = [...next]; calls.push([...next]); },
+  };
+
+  syncPruneToolActivation(pi, { enabled: true, pruneOn: "agentic-auto" });
+  assert.deepEqual(pi.active, ["read", "context_prune"]);
+
+  syncPruneToolActivation(pi, { enabled: true, pruneOn: "on-demand" });
+  assert.deepEqual(pi.active, ["read"]);
+  assert.equal(calls.length >= 2, true);
+});
+
+test("syncPruneToolActivation ignores runtime-not-initialized errors and rethrows other failures", () => {
+  syncPruneToolActivation({
+    getActiveTools() { throw new Error("runtime not initialized"); },
+    setActiveTools() {},
+  }, { enabled: true, pruneOn: "agentic-auto" });
+
+  assert.throws(
+    () => syncPruneToolActivation({
+      getActiveTools() { throw new Error("boom"); },
+      setActiveTools() {},
+    }, { enabled: true, pruneOn: "agentic-auto" }),
+    /boom/,
+  );
+});
+
+test("handleSessionBeforeCompact stays inert when extension is disabled", () => {
+  const state = createRuntimeState();
+  state.config.enabled = false;
+  assert.equal(handleSessionBeforeCompact({}, {}, state), undefined);
+});
+
+test("handleSessionBeforeCompact stays inert when extension is enabled", () => {
+  const state = createRuntimeState();
+  assert.equal(handleSessionBeforeCompact({}, {}, state), undefined);
 });
 
 test("telemetry restore preserves prune impact trace fields after reload", () => {
@@ -187,6 +924,40 @@ test("telemetry restore preserves prune impact trace fields after reload", () =>
   assert.equal(restored.engine.prune.impact.lastSummarizeMaxTokens, 256);
   assert.equal(restored.engine.prune.impact.lastPostPruneHitRate, 0.99);
   assert.equal(restored.engine.prune.impact.lastPostPruneMissTokens, 12);
+});
+
+test("telemetry restore hydrates latest prune debug trace when telemetry lacks it", () => {
+  const state = createRuntimeState();
+  const restored = createRuntimeState();
+  const entries = [
+    {
+      type: "custom",
+      customType: CUSTOM_TYPE_TELEMETRY,
+      data: {
+        version: 1,
+        stats: state.stats,
+        engine: { prune: state.engine.prune },
+      },
+    },
+    {
+      type: "custom",
+      customType: CUSTOM_TYPE_PRUNE_DEBUG,
+      data: {
+        version: 1,
+        prompt: "debug prompt",
+        response: "debug response",
+        acceptedSummaries: ["accepted"],
+        maxTokens: 512,
+        error: "debug error",
+      },
+    },
+  ];
+  assert.equal(restoreTelemetryFromSession({ sessionManager: { getEntries: () => entries } }, restored), true);
+  assert.equal(restored.engine.prune.impact.lastSummarizePrompt, "debug prompt");
+  assert.equal(restored.engine.prune.impact.lastSummarizeResponse, "debug response");
+  assert.deepEqual(restored.engine.prune.impact.lastAcceptedSummaries, ["accepted"]);
+  assert.equal(restored.engine.prune.impact.lastSummarizeMaxTokens, 512);
+  assert.equal(restored.engine.prune.impact.lastError, "debug error");
 });
 
 test("telemetry restore clears legacy pendingSummaries state", () => {
@@ -368,6 +1139,16 @@ test("stableHash is deterministic and detects tool schema drift", () => {
   assert.notEqual(stableHash(base), stableHash(changed));
 });
 
+test("stableHash covers nested, long-key, special-key, and cyclic inputs", () => {
+  const nestedA = { z: [{ b: 2, a: { "weird.key[]": "value", long: "x".repeat(2000) } }] };
+  const nestedB = { z: [{ a: { long: "x".repeat(2000), "weird.key[]": "value" }, b: 2 }] };
+  assert.equal(stableHash(nestedA), stableHash(nestedB));
+  assert.notEqual(stableHash(nestedA), stableHash({ z: [{ a: { long: "x".repeat(1999), "weird.key[]": "value" }, b: 2 }] }));
+  const cyclic = {};
+  cyclic.self = cyclic;
+  assert.throws(() => stableHash(cyclic), RangeError);
+});
+
 test("decision engine matches cache-first thresholds", () => {
   const cfg = DEFAULT_CONFIG;
   assert.equal(decideCompaction({ ratio: 0.50, hitRate: 0.0 }, cfg), "hold");
@@ -396,7 +1177,7 @@ test("parallel read wrapper registers only when extension and wrapper are enable
   registerParallelReadTool({ registerTool: (tool) => registered.push(tool.name) }, { config: { enabled: true, parallelReadTool: false } });
   assert.deepEqual(registered, []);
   registerParallelReadTool({ registerTool: (tool) => registered.push(tool.name) }, { config: { enabled: true, parallelReadTool: true } });
-  assert.deepEqual(registered, ["deepseek_cache_parallel_read"]);
+  assert.deepEqual(registered, ["context_parallel_read"]);
 });
 
 test("tool call repair is read-specific and duplicate suppression window is bounded", () => {
@@ -417,9 +1198,14 @@ test("tool call repair is read-specific and duplicate suppression window is boun
 
 test("detectTextualToolCall flags explicit prose tool calls and avoids provider/definition false positives", () => {
   assert.equal(detectTextualToolCall({ content: "I will call tool read now" }), true);
+  assert.equal(detectTextualToolCall({ content: "I will call the tool now" }), true);
+  assert.equal(detectTextualToolCall({ content: "запусти инструмент search_code" }), true);
+  assert.equal(detectTextualToolCall({ content: "Вызови функцию get_weather" }), true);
+  assert.equal(detectTextualToolCall({ content: "используй функцию context_result_lookup" }), true);
   assert.equal(detectTextualToolCall({ content: "function call: read({ path: 'a.ts' })" }), true);
   assert.equal(detectTextualToolCall({ content: "normal answer" }), false);
   assert.equal(detectTextualToolCall({ content: "This answer explains what a function call is." }), false);
+  assert.equal(detectTextualToolCall({ content: "вот пример вызова search_code" }), false);
   assert.equal(detectTextualToolCall({ content: "If the tool schema has offset and limit, I can call it like:\n```json\n{\"name\":\"context_result_lookup\",\"parameters\":{\"ref\":\"dsc-1\",\"offset\":0,\"limit\":100}}\n```" }), false);
   assert.equal(detectTextualToolCall({ content: "Да, смогу вызывать context_result_lookup({ ref: \"dsc-1\", offset: 0, limit: 100 }) как пример." }), false);
   assert.equal(detectTextualToolCall({ content: "tool_call", toolCalls: [{ name: "read" }] }), false);
@@ -435,9 +1221,16 @@ test("huge result capper elides only above threshold and preserves recovery deta
   assert.equal(result.content[0].type, "text");
   assert.match(result.content[0].text, new RegExp(MODEL_VISIBLE_CONTEXT_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(result.content[0].text, new RegExp(`<model_visible_context schema="${MODEL_VISIBLE_CONTEXT_SCHEMA}" kind="context_result_truncated" ui="custom-rendered">`));
+  assert.match(result.content[0].text, /<instructions>\nThis is segment 1\/2 of a 16-byte tool output; configured segment size is 10 chars\./);
+  assert.ok(result.content[0].text.indexOf("<instructions>") < result.content[0].text.indexOf("<metadata>"));
+  assert.match(result.content[0].text, /Next segment: call context_result_lookup with ref="dsc-bash-1", offset=10, limit=10; 1 segment\(s\) remain\./);
   assert.match(result.content[0].text, /<metadata>/);
   assert.match(result.content[0].text, /"recovery":/);
   assert.match(result.content[0].text, /"tool": "context_result_lookup"/);
+  assert.match(result.content[0].text, /"limit": 10/);
+  assert.match(result.content[0].text, /This is segment 1\//);
+  assert.match(result.content[0].text, /configured segment size is \d+ chars/);
+  assert.match(result.content[0].text, /Next segment: call context_result_lookup with ref="dsc-bash-1", offset=\d+, limit=\d+; \d+ segment\(s\) remain/);
   assert.match(result.content[0].text, /"arguments":/);
   assert.match(result.content[0].text, /dsc-bash-1/);
   assert.match(result.content[0].text, /\[context_result_lookup kind=slice ref=dsc-bash-1 offset=0 limit=16 range=0:16 returned_chars=16 total_chars=16 bytes=16 has_more=false\]/);
@@ -467,19 +1260,51 @@ test("huge result capper elides only above threshold and preserves recovery deta
   assert.equal(expandedLookup, "efghij");
   assert.doesNotMatch(expandedLookup, /\[context_result_lookup kind=slice/);
   assert.equal(maybeCapToolResult({ ...lookup, toolCallId: "lookup-1", toolName: "context_result_lookup" }, config, store), undefined);
+  const collapsedPreview = renderStoredHugeResult(result, false, theme, store).text;
+  assert.doesNotMatch(collapsedPreview, /Truncated result/);
+  assert.doesNotMatch(collapsedPreview, /<instructions>/);
   const missing = await lookupTool.execute("lookup-2", { ref: "missing" });
   assert.equal(missing.details.found, false);
 });
 
-test("huge result capper never inlines full configured head and tail beyond hard preview budget", () => {
+test("huge result capper uses configured char threshold instead of preview or byte length", () => {
+  const store = new HugeResultStore();
+  const config = { ...DEFAULT_CONFIG, hugeResultCapper: true, hugeResultChars: 4, hugeResultHeadChars: 1, hugeResultTailChars: 1 };
+
+  assert.equal(maybeCapToolResult({ content: [{ type: "text", text: "abcd" }], toolCallId: "1", toolName: "bash" }, config, store), undefined);
+  assert.equal(maybeCapToolResult({ content: [{ type: "text", text: "абвг" }], toolCallId: "2", toolName: "bash" }, config, store), undefined);
+
+  const capped = maybeCapToolResult({ content: [{ type: "text", text: "abcde" }], toolCallId: "3", toolName: "bash" }, config, store);
+  assert.ok(capped);
+  assert.match(capped.content[0].text, /configured segment size is 4 chars/);
+  assert.match(capped.content[0].text, /Next segment: call context_result_lookup with ref="dsc-bash-1", offset=4, limit=4/);
+  assert.match(capped.content[0].text, /"limit": 4/);
+});
+
+test("huge result model instruction avoids cutout wording when preview contains the full result", () => {
+  const store = new HugeResultStore();
+  const record = store.remember("abcdefghijklmnop", "1", "bash");
+  const text = buildPreview(record, { ...DEFAULT_CONFIG, hugeResultChars: 20, hugeResultHeadChars: 20, hugeResultTailChars: 0 });
+
+  assert.match(text, /<instructions>\nThis is the complete tool output \(16 bytes\); no other segments exist\./);
+  assert.match(text, /Stored ref dsc-bash-1 may be used later to revisit the same content/);
+  assert.doesNotMatch(text, /segment 1\//);
+  assert.doesNotMatch(text, /remaining slices/);
+  assert.doesNotMatch(text, /not the full file\/output/);
+  assert.equal(store.get("dsc-bash-1").text, "abcdefghijklmnop");
+});
+
+test("huge result capper bounds inline preview by configured segment size", () => {
   const store = new HugeResultStore();
   const result = maybeCapToolResult(
     { content: [{ type: "text", text: "x".repeat(70_000) }], toolCallId: "1", toolName: "bash" },
-    { ...DEFAULT_CONFIG, hugeResultHeadChars: 6_000, hugeResultTailChars: 6_000 },
+    { ...DEFAULT_CONFIG, hugeResultChars: 10_000, hugeResultHeadChars: 6_000, hugeResultTailChars: 6_000 },
     store,
   );
   assert.ok(result);
-  assert.ok(result.content[0].text.length < 3_000);
+  const preview = result.content[0].text.match(/<payload name="preview">\n([\s\S]*?)\n<\/payload>/)?.[1] ?? "";
+  assert.ok(preview.length <= 10_100);
+  assert.match(result.content[0].text, /configured segment size is 10000 chars/);
   assert.match(result.content[0].text, /"tool": "context_result_lookup"/);
 });
 
@@ -500,11 +1325,32 @@ test("huge result refs persist and restore across session reload", () => {
   assert.equal(restored.get("dsc-read-1").text, "persisted".repeat(10_000));
 });
 
+test("huge result store uses fallback slug, truncates long tool slugs, and ignores invalid restored records", () => {
+  const store = new HugeResultStore();
+  const fallback = store.remember("hello world");
+  assert.equal(fallback.ref, "dsc-result-1");
+
+  const long = store.remember("x", "2", "Very_Long Tool Name With Extra Noise 1234567890");
+  assert.match(long.ref, /^dsc-very-long-tool-name--2$/);
+
+  store.restore({ ref: "dsc-read-zz", text: 123 });
+  assert.equal(store.get("dsc-read-zz"), undefined);
+});
+
 test("huge result capper recognizes lookup result shapes without toolName", () => {
   const store = new HugeResultStore();
   const config = { ...DEFAULT_CONFIG, hugeResultCapper: true, hugeResultChars: 100 };
   assert.equal(maybeCapToolResult({ content: [{ type: "text", text: "x".repeat(1000) }], details: { ref: "dsc-1", found: true } }, config, store), undefined);
   assert.equal(maybeCapToolResult({ content: [{ type: "text", text: "x".repeat(1000) }], result: { details: { ref: "dsc-1", found: true } } }, config, store), undefined);
+});
+
+test("huge result capper ignores empty and non-text result shapes", () => {
+  const store = new HugeResultStore();
+  const config = { ...DEFAULT_CONFIG, hugeResultCapper: true, hugeResultChars: 1 };
+  assert.equal(maybeCapToolResult({ content: "" }, config, store), undefined);
+  assert.equal(maybeCapToolResult({ content: [{ type: "image", data: "abc" }] }, config, store), undefined);
+  assert.equal(maybeCapToolResult({ content: [{ type: "text", text: "" }] }, config, store), undefined);
+  assert.equal(maybeCapToolResult({ content: { type: "text", text: "abc" } }, config, store), undefined);
 });
 
 test("huge result preview renderer shows first output and expands from local store", () => {
@@ -522,6 +1368,35 @@ test("huge result preview renderer shows first output and expands from local sto
   assert.match(collapsed, /context_result_lookup \[ref=dsc-read-1\]/);
   assert.doesNotMatch(expanded, /context_result_lookup/);
   assert.match(collapsed, /\[ref dsc-read-1\]/);
+});
+
+test("lookup tool handles offset past end, negative offset, limit zero, and missing stored record in renderer", async () => {
+  const store = new HugeResultStore();
+  store.remember("abcdefghijklmnop", "1", "read");
+  let lookupTool;
+  registerLookupTool({ registerTool: (tool) => { lookupTool = tool; } }, store);
+
+  const pastEnd = await lookupTool.execute("lookup-1", { ref: "dsc-read-1", offset: 999, limit: 10 });
+  assert.equal(pastEnd.content[0].text, "[context_result_lookup kind=slice ref=dsc-read-1 offset=999 limit=10 range=999:999 returned_chars=0 total_chars=16 bytes=16 has_more=false]\n");
+
+  const negativeOffset = await lookupTool.execute("lookup-2", { ref: "dsc-read-1", offset: -5, limit: 4 });
+  assert.equal(negativeOffset.details.offset, 0);
+  assert.equal(negativeOffset.content[0].text, "[context_result_lookup kind=slice ref=dsc-read-1 offset=0 limit=4 range=0:4 returned_chars=4 total_chars=16 bytes=16 has_more=true next_offset=4]\nabcd");
+
+  const limitZero = await lookupTool.execute("lookup-3", { ref: "dsc-read-1", offset: 4, limit: 0 });
+  assert.equal(limitZero.content[0].text, "[context_result_lookup kind=slice ref=dsc-read-1 offset=4 limit=0 range=4:4 returned_chars=0 total_chars=16 bytes=16 has_more=true next_offset=4]\n");
+
+  const theme = { fg: (_name, value) => value, bold: (value) => value };
+  assert.match(lookupTool.renderCall({}, theme).text, /context_result_lookup \? · chars from 0/);
+  assert.equal(lookupTool.renderResult({ content: null, details: {} }, { expanded: false }, theme).text, "");
+
+  const previewOnly = {
+    content: [{ type: "text", text: `${MODEL_VISIBLE_CONTEXT_MARKER}\n<model_visible_context schema="${MODEL_VISIBLE_CONTEXT_SCHEMA}" kind="context_result_truncated" ui="custom-rendered">\n<metadata>\n{"kind":"context_result_truncated","ref":"dsc-missing","source_tool":"bash"}\n</metadata>\n<payload name="preview">\npreview only\n</payload>\n</model_visible_context>` }],
+    details: { elidedBy: "pi-context-engine", ref: "dsc-missing", bytes: 10 },
+  };
+  const rendered = renderStoredHugeResult(previewOnly, false, theme, store).text;
+  assert.match(rendered, /preview only/);
+  assert.match(rendered, /source bash/);
 });
 
 // Token counting edge cases (from semantic-fold.ts)
@@ -555,6 +1430,19 @@ test("token counting: tool_calls with empty args", async () => {
 	});
 	// content 2 + 4 overhead + func name 1 = 7 chars / 4 = 1.75 → 2
 	assert.equal(tokens, 2);
+});
+
+test("token counting: whitespace-only and multimodal content ignore non-text parts", async () => {
+	const { countMessageTokens } = await import("../src/projection/history-folder.ts");
+	assert.equal(countMessageTokens({ role: "user", content: "    " }), 2);
+	assert.equal(countMessageTokens({
+		role: "user",
+		content: [
+			{ type: "image_url", image_url: { url: "data:image/png;base64,xxx" } },
+			{ type: "text", text: "hello" },
+			{ type: "input_audio", data: "ignored" },
+		],
+	}), Math.ceil((5 + 4) / 4));
 });
 
 // ── Cache Checkpoint Tests ──

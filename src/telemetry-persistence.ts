@@ -66,15 +66,22 @@ export function appendPruneDebugEntry(pi: any, data: Record<string, unknown>): v
 export function restoreTelemetryFromSession(ctx: any, state: RuntimeState): boolean {
 	const branch = ctx?.sessionManager?.getEntries?.() ?? ctx?.sessionManager?.getBranch?.() ?? [];
 	let latest: PersistedTelemetry | undefined;
+	let latestPruneDebug: any | undefined;
 	for (const entry of branch) {
 		if (entry?.type === "custom" && entry?.customType === CUSTOM_TYPE_TELEMETRY && entry?.data?.version === 1) {
 			latest = entry.data as PersistedTelemetry;
+		}
+		if (entry?.type === "custom" && entry?.customType === CUSTOM_TYPE_PRUNE_DEBUG && entry?.data?.version === 1) {
+			latestPruneDebug = entry.data;
 		}
 	}
 	if (!latest) return false;
 	state.stats = latest.stats;
 	Object.assign(state.engine, latest.engine);
+	state.engine.prune.pendingBatches = [];
 	state.engine.prune.pendingSummaries = [];
+	state.engine.prune.batchStepCounter = 0;
+	state.engine.prune.skippedMissingResultIds ??= [];
 	state.engine.prune.summarizedRecords ??= [];
 	if (state.engine.prune.summarizedRecords.length > 0) {
 		state.toolIndexer.reset();
@@ -83,7 +90,16 @@ export function restoreTelemetryFromSession(ctx: any, state: RuntimeState): bool
 		}
 	}
 	if (!state.engine.prune.impact) {
-		state.engine.prune.impact = { summarizeRequests: 0, summarizeInputTokens: 0, summarizeOutputTokens: 0, summarizeCost: 0, summarizeToolCalls: 0, summarizeRawChars: 0, summarizeSummaryChars: 0, postPruneRequests: 0, postPruneMissTokens: 0, postPruneCacheReadTokens: 0, postPruneMissCost: 0 };
+		state.engine.prune.impact = { summarizeRequests: 0, summarizeInputTokens: 0, summarizeOutputTokens: 0, summarizeCost: 0, summarizeToolCalls: 0, summarizeRawChars: 0, summarizeSummaryChars: 0, summarizeCacheReadTokens: 0, summarizeByModel: [], postPruneRequests: 0, postPruneMissTokens: 0, postPruneCacheReadTokens: 0, postPruneMissCost: 0 };
+	}
+	state.engine.prune.impact.summarizeCacheReadTokens ??= 0;
+	state.engine.prune.impact.summarizeByModel ??= [];
+	if (latestPruneDebug) {
+		state.engine.prune.impact.lastSummarizePrompt ??= latestPruneDebug.prompt;
+		state.engine.prune.impact.lastSummarizeResponse ??= latestPruneDebug.response;
+		state.engine.prune.impact.lastAcceptedSummaries ??= latestPruneDebug.acceptedSummaries;
+		state.engine.prune.impact.lastSummarizeMaxTokens ??= latestPruneDebug.maxTokens;
+		state.engine.prune.impact.lastError ??= latestPruneDebug.error;
 	}
 	return true;
 }

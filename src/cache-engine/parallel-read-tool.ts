@@ -13,7 +13,7 @@ function isSafePath(root: string, file: string): boolean {
 export function registerParallelReadTool(pi: any, state: RuntimeState): void {
 	if (!state.config.enabled || !state.config.parallelReadTool) return;
 	pi.registerTool?.({
-		name: "deepseek_cache_parallel_read",
+		name: "context_parallel_read",
 		label: t("tool.parallelRead.label"),
 		description: t("tool.parallelRead.description"),
 		promptSnippet: t("tool.parallelRead.promptSnippet"),

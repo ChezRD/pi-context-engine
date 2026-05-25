@@ -173,6 +173,61 @@ export interface PrunerStatus {
 	cacheProfileReason: string;
 }
 
+export type SessionMapNodeKind = "message" | "tool-call" | "tool-result" | "summary" | "custom";
+
+export type SessionMapSegmentKind = "dialogue" | "tool-batch" | "summary" | "custom";
+
+export interface SessionMapNode {
+	id: string;
+	entryId?: string;
+	turnIndex: number;
+	role?: string;
+	kind: SessionMapNodeKind;
+	textPreview?: string;
+	toolCallId?: string;
+	toolName?: string;
+	parentNodeId?: string;
+	ref?: string;
+	offset?: number;
+	limit?: number;
+	summarized?: boolean;
+	dropCandidate?: boolean;
+}
+
+export interface SessionMapSegment {
+	id: string;
+	turnIndex: number;
+	kind: SessionMapSegmentKind;
+	nodeIds: string[];
+	dropCandidate?: boolean;
+	reason?: string;
+}
+
+export interface SessionContentMap {
+	version: 1;
+	builtAt: number;
+	nodes: SessionMapNode[];
+	segments: SessionMapSegment[];
+	totals: {
+		messages: number;
+		toolCalls: number;
+		toolResults: number;
+		lookups: number;
+		summarized: number;
+		dropCandidates: number;
+	};
+}
+
+export interface AuxiliaryModelUsage {
+	modelId: string;
+	provider?: string;
+	requests: number;
+	inputTokens: number;
+	cacheReadTokens: number;
+	outputTokens: number;
+	cost: number;
+}
+
 export interface ContextRecommendation {
 	percent?: number;
 	level: StatusLevel;
@@ -210,6 +265,7 @@ export interface PruneState {
 	pendingSummaries: string[];
 	summarizedIds: string[];
 	skippedOversizedIds?: string[];
+	skippedMissingResultIds?: string[];
 	summarizedRecords?: Array<{
 		toolCallId: string;
 		toolName: string;
@@ -221,10 +277,12 @@ export interface PruneState {
 	pruneRunCount: number;
 	batchStepCounter: number;
 	checkpointTriggered?: boolean;
+	awaitingAgentMessage?: boolean;
 	awaitingImpact?: {
 		turn: number;
 		appliedIds: string[];
 	};
+	sessionMap?: SessionContentMap;
 	impact: {
 		summarizeRequests: number;
 		summarizeInputTokens: number;
@@ -241,6 +299,8 @@ export interface PruneState {
 		lastSummarizeResponse?: string;
 		lastAcceptedSummaries?: string[];
 		lastSummarizeMaxTokens?: number;
+		summarizeCacheReadTokens?: number;
+		summarizeByModel?: AuxiliaryModelUsage[];
 		postPruneRequests: number;
 		postPruneMissTokens: number;
 		postPruneCacheReadTokens: number;

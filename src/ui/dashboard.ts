@@ -10,6 +10,7 @@ import type { Component } from "@earendil-works/pi-tui";
 import { Container, Key, matchesKey, Text, Spacer, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { RuntimeState } from "../runtime-state.ts";
 import { pruneAdjustedSavings, pruneNegativeImpactCost } from "../projection/prune-impact.ts";
+import { pruneMessages } from "../projection/pruner.ts";
 
 function padVisibleRight(str: string, width: number): string {
 	return str + " ".repeat(Math.max(0, width - visibleWidth(str)));
@@ -18,6 +19,55 @@ function padVisibleRight(str: string, width: number): string {
 function formatMoney(value: number, digits = 4): string {
 	if (!Number.isFinite(value)) return "$0.0000";
 	return value < 0 ? `-$${Math.abs(value).toFixed(digits)}` : `$${value.toFixed(digits)}`;
+}
+
+function aggregateModelsWithAux(state: RuntimeState): Array<{
+	modelId: string;
+	provider?: string;
+	requests: number;
+	input: number;
+	cacheRead: number;
+	cacheWrite: number;
+	output: number;
+	actualCost: number;
+	noCacheCost?: number;
+	savings?: number;
+	pricingKnown: boolean;
+	hitRate?: number;
+}> {
+	const base = aggregateByModel(state.stats.usages ?? []).map((item) => ({ ...item }));
+	const byKey = new Map(base.map((item) => [`${item.provider ?? ""}/${item.modelId}`, item]));
+	for (const aux of state.engine.prune.impact?.summarizeByModel ?? []) {
+		const key = `${aux.provider ?? ""}/${aux.modelId}`;
+		const existing = byKey.get(key);
+		const hitRate = hitRatio(aux.inputTokens, aux.cacheReadTokens, 0);
+		if (existing) {
+			existing.requests += aux.requests;
+			existing.input += aux.inputTokens;
+			existing.cacheRead += aux.cacheReadTokens;
+			existing.output += aux.outputTokens;
+			existing.actualCost += aux.cost;
+			existing.hitRate = hitRatio(existing.input, existing.cacheRead, existing.cacheWrite);
+			continue;
+		}
+		const created = {
+			modelId: aux.modelId,
+			provider: aux.provider,
+			requests: aux.requests,
+			input: aux.inputTokens,
+			cacheRead: aux.cacheReadTokens,
+			cacheWrite: 0,
+			output: aux.outputTokens,
+			actualCost: aux.cost,
+			noCacheCost: undefined,
+			savings: undefined,
+			pricingKnown: false,
+			hitRate,
+		};
+		base.push(created);
+		byKey.set(key, created);
+	}
+	return base;
 }
 
 class BorderedContainer implements Component {
@@ -81,10 +131,45 @@ function estimateTokens(text: string): number {
 	return Math.ceil((text?.length ?? 0) / 4);
 }
 
+function contentTokens(content: any): number {
+	if (typeof content === "string") return estimateTokens(content);
+	if (!Array.isArray(content)) return 0;
+	let total = 0;
+	for (const part of content) {
+		if (typeof part === "string") total += estimateTokens(part);
+		else if (typeof part?.text === "string") total += estimateTokens(part.text);
+		else if (typeof part?.thinking === "string") total += estimateTokens(part.thinking);
+		else if (part?.type === "toolCall" || part?.type === "tool_use") total += estimateTokens(JSON.stringify(part));
+	}
+	return total;
+}
+
+function branchMessagesForDashboard(branch: any[]): any[] {
+	const messages: any[] = [];
+	for (const entry of branch) {
+		if (entry?.type === "message" && entry.message) {
+			messages.push(entry.message);
+			continue;
+		}
+		if (entry?.type === "custom_message") {
+			messages.push({ role: "assistant", content: entry.content, customType: entry.customType });
+			continue;
+		}
+		if (entry?.type === "branch_summary" && entry.summary) {
+			messages.push({ role: "assistant", content: entry.summary });
+			continue;
+		}
+		if (entry?.type === "compaction" && entry.summary) {
+			messages.push({ role: "assistant", content: entry.summary });
+		}
+	}
+	return messages;
+}
+
 /**
  * Build token breakdown from branch data.
  */
-async function getBreakdown(pi: any, ctx: any): Promise<{
+async function getBreakdown(pi: any, ctx: any, state?: RuntimeState): Promise<{
 	usage: any; systemTokens: number; toolDefTokens: number; msgTokens: number;
 	toolUseTokens: number; toolResultTokens: number; totalActual: number;
 	limit: number; usagePercent: number; categories: Array<{ key: string; label: string; value: number }>;
@@ -99,42 +184,32 @@ async function getBreakdown(pi: any, ctx: any): Promise<{
 	const allTools = pi.getAllTools?.() ?? [];
 	const activeToolDefs = allTools.filter((t: any) => tools.includes(t.name));
 
-	let msgTokensRaw = 0, toolUseTokensRaw = 0, toolResultTokensRaw = 0;
+	const sourceMessages = branchMessagesForDashboard(branch);
+	const projectedMessages = state?.toolIndexer?.getAllSummarized?.().length
+		? pruneMessages(sourceMessages, state.toolIndexer)
+		: sourceMessages;
 
-	for (const entry of branch) {
-		if (entry.type !== "message") {
-			if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.summary) msgTokensRaw += estimateTokens(entry.summary);
-			continue;
-		}
-		const m = entry.message;
+	let msgTokens = 0, toolUseTokens = 0, toolResultTokens = 0;
+
+	for (const m of projectedMessages) {
 		if (!m) continue;
 		if (m.role === "user") {
-			if (typeof m.content === "string") msgTokensRaw += estimateTokens(m.content);
-			else if (Array.isArray(m.content)) for (const p of m.content) if (p.type === "text") msgTokensRaw += estimateTokens(p.text);
+			msgTokens += contentTokens(m.content);
 		} else if (m.role === "assistant") {
-			if (typeof m.content === "string") msgTokensRaw += estimateTokens(m.content);
-			else if (Array.isArray(m.content)) for (const p of m.content) {
-				if (p.type === "text") msgTokensRaw += estimateTokens(p.text);
-				if (p.type === "toolCall") toolUseTokensRaw += estimateTokens(JSON.stringify(p));
-			}
+			msgTokens += contentTokens(m.content);
+			if (Array.isArray(m.tool_calls)) toolUseTokens += estimateTokens(JSON.stringify(m.tool_calls));
+			if (Array.isArray(m.toolCalls)) toolUseTokens += estimateTokens(JSON.stringify(m.toolCalls));
 		} else if (m.role === "tool" || m.role === "toolResult") {
-			if (Array.isArray(m.content)) for (const p of m.content) if (p.type === "text") toolResultTokensRaw += estimateTokens(p.text);
+			toolResultTokens += contentTokens(m.content);
 		} else if (m.role === "bash" || m.role === "bashExecution") {
-			toolUseTokensRaw += estimateTokens(m.command ?? "");
+			toolUseTokens += estimateTokens(m.command ?? "");
 		}
 	}
 
-	const systemTokensRaw = estimateTokens(systemPrompt);
-	const toolDefTokensRaw = estimateTokens(JSON.stringify(activeToolDefs));
-	const totalRaw = systemTokensRaw + toolDefTokensRaw + msgTokensRaw + toolUseTokensRaw + toolResultTokensRaw;
-	const ratio = totalRaw > 0 ? (usage.tokens / totalRaw) : 1;
-
-	const systemTokens = Math.round(systemTokensRaw * ratio);
-	const toolDefTokens = Math.round(toolDefTokensRaw * ratio);
-	const msgTokens = Math.round(msgTokensRaw * ratio);
-	const toolUseTokens = Math.round(toolUseTokensRaw * ratio);
-	const toolResultTokens = Math.round(toolResultTokensRaw * ratio);
-	const otherTokens = Math.max(0, usage.tokens - (systemTokens + toolDefTokens + msgTokens + toolUseTokens + toolResultTokens));
+	const systemTokens = estimateTokens(systemPrompt);
+	const toolDefTokens = estimateTokens(JSON.stringify(activeToolDefs));
+	const totalActual = systemTokens + toolDefTokens + msgTokens + toolUseTokens + toolResultTokens;
+	const otherTokens = Math.max(0, totalActual - (systemTokens + toolDefTokens + msgTokens + toolUseTokens + toolResultTokens));
 
 	const categories: Array<{ key: string; label: string; value: number }> = [
 		{ key: "system", label: t("ui.dashboard.system"), value: systemTokens },
@@ -144,7 +219,8 @@ async function getBreakdown(pi: any, ctx: any): Promise<{
 	];
 	if (otherTokens > 10) categories.push({ key: "other", label: t("ui.dashboard.other"), value: otherTokens });
 
-	return { usage, systemTokens, toolDefTokens, msgTokens, toolUseTokens, toolResultTokens, totalActual: usage.tokens, limit: usage.contextWindow, usagePercent: usage.percent, categories };
+	const usagePercent = usage.contextWindow > 0 ? (totalActual / usage.contextWindow) * 100 : 0;
+	return { usage: { ...usage, tokens: totalActual, percent: usagePercent }, systemTokens, toolDefTokens, msgTokens, toolUseTokens, toolResultTokens, totalActual, limit: usage.contextWindow, usagePercent, categories };
 }
 
 // ── Cache stats section ──
@@ -203,7 +279,7 @@ function buildCacheLines(state: RuntimeState | undefined, theme: any): string[] 
 		lines.push(`${theme.fg("muted", t(cfg, "ui.dashboard.currentSegmentLabel"))}  ${theme.fg("text", segParts.join(" · "))} ${theme.fg(warmColor, `· ${t(cfg, "ui.dashboard.warmHitShort")} ${formatRatio(warmRate)}`)}`);
 		lines.push(...buildPruneLines(state, theme));
 
-		const models = aggregateByModel(state.stats.usages ?? []);
+		const models = aggregateModelsWithAux(state);
 		if (models.length > 0) {
 			lines.push("");
 			lines.push(`${theme.fg("muted", t(cfg, "ui.dashboard.modelsLabel"))}`);
@@ -263,6 +339,7 @@ function pruneNextLabel(state: RuntimeState): string {
 	if (cfg.pruneOn === "on-demand") return t(cfg, "status.pruneNext.manual");
 	const target = Math.max(1, cfg.pruneBatchSize);
 	const current = Math.min(state.engine.prune.batchStepCounter, target);
+	if (cfg.pruneOn === "agent-message" && state.engine.prune.awaitingAgentMessage && pendingPruneToolCalls(state) > 0) return t(cfg, "status.pruneNext.agentMessage");
 	return current >= target ? t(cfg, "status.pruneNext.now") : `${current}/${target}`;
 }
 
@@ -287,14 +364,14 @@ function buildPruneLines(state: RuntimeState, theme: any): string[] {
 		const missCost = `$${impact.postPruneMissCost.toFixed(4)}`;
 		const lastMissCost = `$${(impact.lastPostPruneMissCost ?? 0).toFixed(4)}`;
 		const lastHit = impact.lastPostPruneHitRate === undefined ? "n/a" : formatRatio(impact.lastPostPruneHitRate);
-		const rawChars = formatTokenCount(impact.summarizeRawChars ?? 0);
-		const summaryChars = formatTokenCount(impact.summarizeSummaryChars ?? 0);
+		const rawChars = formatTokenCount(impact.lastSummarizeRawChars ?? 0);
+		const summaryChars = formatTokenCount(impact.lastSummarizeSummaryChars ?? 0);
 		const lastRawChars = formatTokenCount(impact.lastSummarizeRawChars ?? 0);
 		const lastSummaryChars = formatTokenCount(impact.lastSummarizeSummaryChars ?? 0);
-		const deltaChars = formatTokenCount(Math.max(0, (impact.summarizeRawChars ?? 0) - (impact.summarizeSummaryChars ?? 0)));
+		const deltaChars = formatTokenCount(Math.max(0, (impact.lastSummarizeRawChars ?? 0) - (impact.lastSummarizeSummaryChars ?? 0)));
 		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneSummaryImpact", { requests: impact.summarizeRequests, tokens: formatTokenCount(impact.summarizeInputTokens + impact.summarizeOutputTokens), cost: summaryCost, last: lastSummaryCost })}`));
 		lines.push(theme.fg("success", `  ${t(cfg, "ui.dashboard.pruneSliceImpact", { raw: rawChars, summary: summaryChars, delta: deltaChars, lastRaw: lastRawChars, lastSummary: lastSummaryChars })}`));
-		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneMissImpact", { requests: impact.postPruneRequests, miss: formatTokenCount(impact.postPruneMissTokens), cache: formatTokenCount(impact.postPruneCacheReadTokens), cost: missCost, last: lastMissCost, hit: lastHit })}`));
+		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneMissImpact", { requests: impact.postPruneRequests, miss: formatTokenCount(impact.lastPostPruneMissTokens ?? 0), cache: formatTokenCount(impact.postPruneCacheReadTokens), cost: lastMissCost, last: lastMissCost, hit: lastHit })}`));
 		if (impact.lastError) {
 			lines.push(theme.fg("warning", `  ${t(cfg, "ui.dashboard.pruneError", { error: impact.lastError })}`));
 		}
@@ -420,7 +497,7 @@ export async function showDashboard(pi: any, ctx: any, state?: RuntimeState): Pr
 
 	// Try TUI overlay first
 	if (typeof ctx.ui?.custom === "function") {
-		const data = await getBreakdown(pi, ctx);
+		const data = await getBreakdown(pi, ctx, state);
 		if (!data) return;
 		
 		await ctx.ui.custom((_tui: any, theme: any, _kb: any, done: (result?: any) => void) => {
@@ -516,7 +593,7 @@ export async function showDashboard(pi: any, ctx: any, state?: RuntimeState): Pr
 	}
 
 	// Fallback: flat text notification
-	const data = await getBreakdown(pi, ctx);
+	const data = await getBreakdown(pi, ctx, state);
 	if (!data) { ctx.ui?.notify?.(t("ui.dashboard.unavailable"), "warning"); return; }
 	const { totalActual, limit, usagePercent, categories } = data;
 	const lines: string[] = [`── ${t("ui.dashboard.title").trim()} ──`];

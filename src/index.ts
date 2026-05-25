@@ -18,9 +18,10 @@ import { persistTelemetry, restoreTelemetryFromSession } from "./telemetry-persi
 import { PinStore, persistPinEntry, restorePinsFromSession } from "./context-pins/store.ts";
 import { registerPinTools } from "./context-pins/tools.ts";
 import { applyPinInjection, computeInjectionHash } from "./context-pins/injection.ts";
-import { detectTextualToolCall, handleBeforeAgentStart, handleBeforeProviderRequest, handleContext, handleSessionBeforeCompact, handleToolCall, handleTurnEnd, registerFoldTool, registerParallelReadTool } from "./cache-engine/index.ts";
+import { detectTextualToolCall, handleBeforeAgentStart, handleBeforeProviderRequest, handleContext, handleMessageEnd, handleSessionBeforeCompact, handleToolCall, handleTurnEnd, registerFoldTool, registerParallelReadTool } from "./cache-engine/index.ts";
 import { annotateUsageForCurrentSegment, openCacheCheckpoint } from "./cache-engine/cache-checkpoints.ts";
 import { recordPostPruneImpact } from "./projection/prune-impact.ts";
+import { buildSessionContentMap } from "./projection/session-map.ts";
 import { t } from "./i18n/index.ts";
 
 export { getDeepSeekCacheCompletions } from "./commands.ts";
@@ -50,7 +51,7 @@ export default async function deepSeekCache(pi: ExtensionAPI, initialCtx?: Exten
 	registerFoldTool(pi, state);
 	registerParallelReadTool(pi, state);
 
-	registerCommands(pi, () => currentCtx, state, store);
+	registerCommands(pi, () => currentCtx, state, store, state.toolIndexer);
 	registerAgenticTools(pi, {
 		cacheState: state,
 		onRewind: () => {
@@ -190,6 +191,7 @@ function registerLifecycleHandlers(pi: ExtensionAPI, withCtx: (ctx?: any) => any
 		if (annotated) state.stats = addUsage(state.stats, annotated, annotated.modelId ?? state.detection.modelId, liveCtx?.model?.cost);
 		if (annotated) recordPostPruneImpact(state, annotated, liveCtx?.model?.cost);
 		if (annotated) persistTelemetry(pi, state);
+		await handleMessageEnd(event, pi, liveCtx, state);
 		await refreshContextAndStatus(liveCtx, state);
 		return undefined;
 	});
@@ -227,15 +229,18 @@ function registerLifecycleHandlers(pi: ExtensionAPI, withCtx: (ctx?: any) => any
 
 async function refreshContextAndStatus(ctx: any, state: RuntimeState): Promise<void> {
 	syncModelSelection(ctx, state);
+	let branch: any[] | undefined;
 
 	if (state.stats.requests === 0) {
 		if (restoreTelemetryFromSession(ctx, state)) {
+			branch = await ctx?.sessionManager?.getBranch?.();
+			state.engine.prune.sessionMap = buildSessionContentMap(branch, state);
 			state.contextPct = await readContextPercent(ctx);
 			setStatus(ctx, state);
 			return;
 		}
 		try {
-			const branch = await ctx?.sessionManager?.getBranch?.();
+			branch = await ctx?.sessionManager?.getBranch?.();
 			if (branch && branch.length > 0) {
 				for (const entry of branch) {
 					if (entry.message?.role === "assistant") {
@@ -252,6 +257,14 @@ async function refreshContextAndStatus(ctx: any, state: RuntimeState): Promise<v
 			// ignore
 		}
 	}
+	if (!branch) {
+		try {
+			branch = await ctx?.sessionManager?.getBranch?.();
+		} catch {
+			branch = undefined;
+		}
+	}
+	state.engine.prune.sessionMap = buildSessionContentMap(branch, state);
 	state.contextPct = await readContextPercent(ctx);
 	setStatus(ctx, state);
 }

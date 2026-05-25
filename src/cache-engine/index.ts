@@ -1,15 +1,13 @@
 import type { RuntimeState } from "../runtime-state.ts";
 import { estimateTurnStart } from "./decision-engine.ts";
-import { pruneMessages } from "../projection/pruner.ts";
 import { maybeInjectCachePrompt } from "./cache-prompt-inject.ts";
 import { checkPrefixStability } from "./prefix-stability.ts";
-import { handleTurnEnd as decideAtTurnEnd, requestFold } from "./auto-compact.ts";
+import { handleAgentMessagePrune, handleTurnEnd as decideAtTurnEnd, requestFold } from "./auto-compact.ts";
 import { handleProviderPrefix } from "./prefix-fingerprint.ts";
 import { handleSessionBeforeCompact as beforeCompact } from "./custom-compaction.ts";
 import { activateAppendOnlyProjectionFromCompact, applyAppendOnlyProjection } from "./append-only-projection.ts";
 import { detectTextualToolCall, handleToolCall as toolCall } from "./tool-stability.ts";
-import { markAwaitingPruneImpact } from "../projection/prune-impact.ts";
-import { openCacheCheckpoint } from "./cache-checkpoints.ts";
+import { rebuildPrunedContext } from "../projection/rebuild.ts";
 export { holdCompaction, requestCompact, requestFold } from "./auto-compact.ts";
 export { registerFoldTool } from "./fold-tool.ts";
 export { buildContextStatus, canCompactNow, decideCompaction, decisionLabel, estimateTurnStart } from "./decision-engine.ts";
@@ -32,20 +30,14 @@ export async function handleBeforeAgentStart(pi: any, event: any, ctx: any, stat
 }
 
 export async function handleContext(event: any, ctx: any, state: RuntimeState): Promise<any | undefined> {
+	let changed = false;
+
 	// Step 1: Tool pruning (Pillar 1) — remove summarized tool results
 	if (event?.messages && state.toolIndexer?.getAllSummarized()?.length > 0) {
-		const prunableIds = collectPrunableToolResultIds(event.messages, state);
-		const pruned = pruneMessages(event.messages, state.toolIndexer);
-		if (pruned.length !== event.messages.length || prunableIds.length > 0) {
-			event.messages = pruned;
-		}
-		const newlyApplied = prunableIds.filter((id) => !state.engine.prune.appliedIds.includes(id));
-		if (newlyApplied.length > 0) {
-			state.engine.prune.appliedIds.push(...newlyApplied);
-			state.engine.prune.pruneRunCount++;
-			state.engine.prune.pendingSummaries = [];
-			markAwaitingPruneImpact(state, newlyApplied);
-			openCacheCheckpoint(state, "prune", { startSegment: true, note: `${newlyApplied.length} tool results pruned` });
+		const rebuild = rebuildPrunedContext(event.messages, state);
+		if (rebuild.changed) {
+			event.messages = rebuild.messages;
+			changed = true;
 		}
 		// Summaries are now injected directly into the toolResult content by pruneMessages.
 	}
@@ -81,17 +73,7 @@ export async function handleContext(event: any, ctx: any, state: RuntimeState): 
 	// Fallback: append-only projection
 	const projection = applyAppendOnlyProjection(event, ctx, state);
 	checkPrefixStability(projection ?? event, ctx, state);
-	return projection;
-}
-
-function collectPrunableToolResultIds(messages: any[], state: RuntimeState): string[] {
-	const ids: string[] = [];
-	for (const msg of messages) {
-		if (msg?.role !== "tool" && msg?.role !== "toolResult") continue;
-		const id = msg.toolCallId ?? msg.tool_call_id;
-		if (id && state.toolIndexer.isSummarized(id)) ids.push(id);
-	}
-	return ids;
+	return projection ?? (changed ? { messages: event.messages } : undefined);
 }
 
 export function handleBeforeProviderRequest(event: any, ctx: any, state: RuntimeState): void {
@@ -102,6 +84,10 @@ export async function handleTurnEnd(event: any, pi: any, ctx: any, state: Runtim
 	if (typeof event?.turnIndex === "number") state.engine.turnIndex = event.turnIndex;
 	else state.engine.turnIndex++;
 	await decideAtTurnEnd(pi, ctx, state, event);
+}
+
+export async function handleMessageEnd(event: any, pi: any, ctx: any, state: RuntimeState): Promise<void> {
+	await handleAgentMessagePrune(pi, ctx, state, event);
 }
 
 export function handleSessionBeforeCompact(event: any, ctx: any, state: RuntimeState): any | undefined {

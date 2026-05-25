@@ -116,7 +116,7 @@ export const DEFAULT_CONFIG: ExtensionConfig = {
 	pruneEnabled: true,
 	pruneOn: "agent-message",
 	pruneModel: "deepseek-v4-flash",
-	pruneIncludeContext: true,
+	pruneIncludeContext: false,
 	pruneBatchSize: 5,
 	pruneBridgeLength: 2,
 	statusBarStyle: "sparkline",
@@ -160,7 +160,7 @@ function num(value: unknown, fallback: number, min = 0): number {
 }
 
 function intRange(value: unknown, fallback: number, min: number, max: number): number {
-	const n = num(value, fallback, min);
+	const n = typeof value === "number" && Number.isFinite(value) ? value : fallback;
 	return Math.max(min, Math.min(max, Math.round(n)));
 }
 

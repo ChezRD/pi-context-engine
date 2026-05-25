@@ -101,7 +101,7 @@ async function withTempHome(fn) {
 }
 
 test("command argument completions match Pi registerCommand docs", async () => {
-  const expected = ["status", "diagnose", "fold", "compact", "hold", "config", "reset-stats", "enable-capper", "disable-capper", "init"];
+  const expected = ["status", "diagnose", "fold", "compact", "hold", "prune", "config", "reset-stats", "enable-capper", "disable-capper", "init"];
   assert.deepEqual(getDeepSeekCacheCompletions("sta").map((item) => item.value), ["status"]);
   assert.deepEqual(getDeepSeekCacheCompletions("" ).map((item) => item.value), expected);
   assert.equal(getDeepSeekCacheCompletions("status extra"), null);
@@ -114,6 +114,7 @@ test("command argument completions match Pi registerCommand docs", async () => {
     assert.equal(typeof registered.getArgumentCompletions, "function");
     assert.deepEqual(registered.getArgumentCompletions("").map((item) => item.value), expected);
     for (const subcommand of expected) assert.match(registered.argumentHint, new RegExp(`(^|[ |])${subcommand}([ |]|$)`), subcommand);
+    assert.equal(commands.has("prune"), true);
   });
 });
 
@@ -125,6 +126,7 @@ test("extension factory follows Pi contract: accepts only pi and waits for event
     await extension(pi);
 
     assert.equal(commands.has("context-engine"), true);
+    assert.equal(commands.has("prune"), true);
     assert.equal(calls.some((call) => call[0] === "setActiveTools"), false);
     assert.equal(calls.some((call) => call[0] === "registerProvider"), false);
     assert.equal(calls.some((call) => call[0] === "registerTool" && call[1] === "context_result_lookup"), true);
@@ -133,6 +135,34 @@ test("extension factory follows Pi contract: accepts only pi and waits for event
 
     await handlers.get("session_start")({}, ctx);
     assert.equal(status.at(-1)[0], "context-engine");
+  });
+});
+
+test("extension skips lookup registration when hugeResultCapper is disabled", async () => {
+  await withTempHome(async (home) => {
+    const { pi, calls } = createMockPi();
+    await mkdir(join(home, ".pi/agent"), { recursive: true });
+    await writeFile(join(home, ".pi/agent/context-engine.json"), JSON.stringify({ hugeResultCapper: false }), "utf8");
+
+    await extension(pi);
+
+    assert.equal(calls.some((call) => call[0] === "registerTool" && call[1] === "context_result_lookup"), false);
+  });
+});
+
+test("extension registers dynamic provider with fallback model ids when enabled", async () => {
+  await withTempHome(async (home) => {
+    const { pi, calls } = createMockPi();
+    await mkdir(join(home, ".pi/agent"), { recursive: true });
+    await writeFile(join(home, ".pi/agent/context-engine.json"), JSON.stringify({ registerDynamicProvider: true }), "utf8");
+    process.env.DEEPSEEK_API_KEY = "";
+
+    await extension(pi);
+
+    const providerCall = calls.find((call) => call[0] === "registerProvider");
+    assert.ok(providerCall);
+    assert.equal(providerCall[1], "context-engine-provider");
+    assert.deepEqual(providerCall[2].models.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
   });
 });
 
@@ -212,6 +242,38 @@ test("before_agent_start skips when cachePromptInjection is disabled", async () 
 
     await extension(pi);
     assert.equal(await handlers.get("before_agent_start")({ systemPrompt: "base" }, ctx), undefined);
+  });
+});
+
+test("before_agent_start skips duplicate cache prompt injection when marker already exists", async () => {
+  await withTempHome(async () => {
+    const { pi, handlers } = createMockPi();
+    const { ctx } = createMockCtx();
+
+    await extension(pi);
+    const result = await handlers.get("before_agent_start")({ systemPrompt: "[DeepSeek Cache Optimization]\nbase" }, ctx);
+    assert.ok(result);
+    assert.doesNotMatch(result.systemPrompt, /\[Context Engine\]/);
+    assert.match(result.systemPrompt, /\[DeepSeek Cache Optimization\]/);
+    assert.match(result.systemPrompt, /Context Engine Pins/);
+  });
+});
+
+test("before_agent_start triggers preflight fold and warning when context is above threshold", async () => {
+  await withTempHome(async () => {
+    const { pi, handlers } = createMockPi();
+    const mock = createMockCtx();
+    mock.ctx.getContextUsage = () => ({ tokens: 950, contextWindow: 1000 });
+
+    await extension(pi);
+    await handlers.get("turn_end")({ turnIndex: 1 }, mock.ctx);
+    const before = mock.compactCalls.length;
+    const result = await handlers.get("before_agent_start")({ systemPrompt: "base" }, mock.ctx);
+
+    assert.match(result.systemPrompt, /Context Engine/);
+    assert.equal(mock.compactCalls.length > before, true);
+    assert.match(mock.notifications.at(-1)[0], /pre-flight fold triggered/i);
+    assert.equal(mock.notifications.at(-1)[1], "warning");
   });
 });
 
@@ -363,7 +425,7 @@ test("fold tool registers by default", async () => {
     const { ctx } = createMockCtx();
     await extension(mock.pi);
     await mock.handlers.get("session_start")({}, ctx);
-    assert.equal(mock.calls.some((call) => call[0] === "registerTool" && call[1] === "deepseek_cache_fold"), true);
+    assert.equal(mock.calls.some((call) => call[0] === "registerTool" && call[1] === "context_cache_fold"), true);
   });
 });
 
@@ -705,6 +767,60 @@ test("e2e lifecycle covers session, prompt, context, provider, stats, turn, and 
   });
 });
 
+test("session_start restores usage stats from branch when telemetry is absent", async () => {
+  await withTempHome(async () => {
+    const { pi, handlers, commands } = createMockPi();
+    const mock = createMockCtx();
+    mock.ctx.sessionManager = {
+      getEntries: () => [],
+      getBranch: async () => [
+        { type: "message", turnIndex: 3, message: { role: "assistant", usage: { input: 20, cacheRead: 80, cacheWrite: 0, output: 5 } } },
+      ],
+    };
+
+    await extension(pi);
+    await handlers.get("session_start")({}, mock.ctx);
+
+    const status = await commands.get("context-engine").handler("status", mock.ctx);
+    assert.match(status, /Cache: 80\.0% session \/ 80\.0% last/);
+    assert.equal(mock.status.at(-1)[0], "context-engine");
+  });
+});
+
+test("session_start refresh stays graceful when session branch lookup fails", async () => {
+  await withTempHome(async () => {
+    const { pi, handlers, commands } = createMockPi();
+    const mock = createMockCtx();
+    mock.ctx.sessionManager = {
+      getEntries: () => [],
+      getBranch: async () => { throw new Error("branch unavailable"); },
+    };
+
+    await extension(pi);
+    await handlers.get("session_start")({}, mock.ctx);
+
+    const diagnose = await commands.get("context-engine").handler("diagnose", mock.ctx);
+    assert.match(diagnose, /No completed model requests with usage data yet\./);
+    assert.match(diagnose, /Usage: 60%/);
+    assert.equal(mock.status.at(-1)[0], "context-engine");
+  });
+});
+
+test("message_end ignores non-assistant messages while session_compact records host compaction", async () => {
+  await withTempHome(async () => {
+    const { pi, handlers, commands } = createMockPi();
+    const mock = createMockCtx();
+
+    await extension(pi);
+    await handlers.get("message_end")({ message: { role: "user", usage: { input: 50, cacheRead: 50, output: 10 } } }, mock.ctx);
+    await handlers.get("session_compact")({}, mock.ctx);
+
+    const diagnose = await commands.get("context-engine").handler("diagnose", mock.ctx);
+    assert.match(diagnose, /No completed model requests with usage data yet\./);
+    assert.match(diagnose, /Compaction history: host@0:completed/);
+  });
+});
+
 test("e2e command flow covers init, status, diagnose, hold, fold, and reset-stats", async () => {
   await withTempHome(async (home) => {
     const { pi, handlers, commands } = createMockPi();
@@ -899,6 +1015,22 @@ test("all context-engine subcommands execute and notify", async () => {
       assert.match(notifications.at(-1)[0], pattern, subcommand);
       assert.equal(notifications.at(-1)[1], level, subcommand);
     }
+  });
+});
+
+test("manual prune shows start notification and warns when it cannot run", async () => {
+  await withTempHome(async () => {
+    const { pi, commands } = createMockPi();
+    const { ctx, notifications } = createMockCtx();
+    await extension(pi);
+
+    const output = await commands.get("prune").handler("", ctx);
+
+    assert.match(notifications.at(-2)[0], /prune started/i);
+    assert.equal(notifications.at(-2)[1], "info");
+    assert.match(output, /no session manager/i);
+    assert.match(notifications.at(-1)[0], /no session manager/i);
+    assert.equal(notifications.at(-1)[1], "warning");
   });
 });
 

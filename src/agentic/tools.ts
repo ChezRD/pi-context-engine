@@ -10,14 +10,14 @@ import { openCacheCheckpoint } from "../cache-engine/cache-checkpoints.ts";
 import { buildModelVisibleContext } from "../model-visible.ts";
 
 const ContextCheckpointParams = Type.Object({
-	name: Type.String({ description: "Checkpoint name. Use meaningful names like 'before-refactor'." }),
-	target: Type.Optional(Type.String({ description: "Optional entry ID or checkpoint name to label. Defaults to current position." })),
+	name: Type.String({ description: t("tool.checkpoint.param.name") }),
+	target: Type.Optional(Type.String({ description: t("tool.checkpoint.param.target") })),
 });
 
 const ContextRewindParams = Type.Object({
-	target: Type.String({ description: "Checkpoint name or entry ID to rewind to. Becomes the new root for continuation." }),
-	message: Type.String({ description: "Carryover summary: current progress, important changes, and next step." }),
-	backupCheckpoint: Type.Optional(Type.String({ description: "Optional checkpoint name for current state before rewinding." })),
+	target: Type.String({ description: t("tool.rewind.param.target") }),
+	message: Type.String({ description: t("tool.rewind.param.message") }),
+	backupCheckpoint: Type.Optional(Type.String({ description: t("tool.rewind.param.backupCheckpoint") })),
 });
 
 function findLabelInTree(sm: any, checkpointName: string): string | null {
@@ -37,8 +37,8 @@ export function registerAgenticTools(pi: any, state?: { cacheState?: RuntimeStat
 	// ── context_checkpoint ──
 	pi.registerTool?.({
 		name: "context_checkpoint",
-		label: "Context Checkpoint",
-		description: "Create a named checkpoint in conversation history. Use before risky work or at stable milestones.",
+		label: t("tool.checkpoint.label"),
+		description: t("tool.checkpoint.longDescription"),
 		parameters: ContextCheckpointParams,
 		async execute(_id: string, params: Static<typeof ContextCheckpointParams>, _signal: any, _onUpdate: any, ctx: any) {
 			const sm = ctx.sessionManager;
@@ -81,8 +81,8 @@ export function registerAgenticTools(pi: any, state?: { cacheState?: RuntimeStat
 	// ── context_rewind ──
 	pi.registerTool?.({
 		name: "context_rewind",
-		label: "Conversation Rewind",
-		description: "Return to an earlier checkpoint and start a fresh continuation with a carryover summary.",
+		label: t("tool.rewind.label"),
+		description: t("tool.rewind.longDescription"),
 		parameters: ContextRewindParams,
 		async execute(_id: string, params: Static<typeof ContextRewindParams>, _signal: any, _onUpdate: any, ctx: any) {
 			const sm = ctx.sessionManager;
@@ -137,7 +137,7 @@ export function registerAgenticTools(pi: any, state?: { cacheState?: RuntimeStat
 			// Store rewind params for agent_end handler
 			rewindState.rewindParams = { nid, tid, enrichedMessage, targetName: params.target };
 
-			return { content: [{ type: "text", text: "rewind start" }], details: {} };
+			return { content: [{ type: "text", text: t("tool.rewind.started") }], details: {} };
 		},
 	});
 
@@ -154,7 +154,7 @@ export function registerAgenticTools(pi: any, state?: { cacheState?: RuntimeStat
 
 		await ctx.navigateTree?.(rp.nid, { summarize: false });
 		ctx.ui?.notify?.(
-			`Rewound to ${rp.targetName}\nmessage: ${rp.enrichedMessage.slice(0, 200)}`,
+			t("tool.rewind.notify.detail", { target: rp.targetName, message: rp.enrichedMessage.slice(0, 200) }),
 			"info",
 		);
 

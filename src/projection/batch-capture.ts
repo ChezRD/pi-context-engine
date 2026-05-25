@@ -29,7 +29,7 @@ export function extractMessageContext(msg: any): string | undefined {
 
 function joinContext(parts: Array<string | undefined>): string | undefined {
 	const text = parts.map((part) => part?.trim()).filter(Boolean).join("\n\n").trim();
-	return text ? text.slice(0, BRIDGE_CONTEXT_CHARS) : undefined;
+	return text ? text.slice(-BRIDGE_CONTEXT_CHARS) : undefined;
 }
 
 function pendingIds(batches: CapturedBatch[]): Set<string> {
@@ -44,11 +44,12 @@ function skipIdSet(skipIds: string[] | undefined, batches: CapturedBatch[]): Set
 	return ids;
 }
 
-function pushPendingBatch(pruneState: { pendingBatches: CapturedBatch[] }, turnIndex: number, toolCalls: CapturedToolCall[], context?: string): void {
+function pushPendingBatch(pruneState: { pendingBatches: CapturedBatch[] }, turnIndex: number, toolCalls: CapturedToolCall[], context?: string): number {
 	const existingIds = pendingIds(pruneState.pendingBatches);
-	const fresh = toolCalls.filter((tc) => !existingIds.has(tc.id));
-	if (fresh.length === 0) return;
+	const fresh = toolCalls.filter((tc) => !existingIds.has(tc.id) && typeof tc.result === "string" && tc.result.trim().length > 0);
+	if (fresh.length === 0) return 0;
 	pruneState.pendingBatches.push({ turnIndex, context, toolCalls: fresh });
+	return fresh.length;
 }
 
 function toolResultId(result: any): string | undefined {
@@ -57,9 +58,9 @@ function toolResultId(result: any): string | undefined {
 
 function toolResultText(result: any): string {
 	if (!result) return "";
-	if (typeof result.content === "string") return result.content.slice(0, 5000);
+	if (typeof result.content === "string") return result.content.trim() ? result.content.slice(0, 5000) : "";
 	if (Array.isArray(result.content)) {
-		return result.content
+		const text = result.content
 			.map((part: any) => {
 				if (typeof part === "string") return part;
 				if (part?.type === "text" && typeof part.text === "string") return part.text;
@@ -68,8 +69,22 @@ function toolResultText(result: any): string {
 			.filter(Boolean)
 			.join("\n")
 			.slice(0, 5000);
+		if (text.trim()) return text;
 	}
-	if (typeof result.result === "string") return result.result.slice(0, 5000);
+	if (typeof result.result === "string" && result.result.trim()) return result.result.slice(0, 5000);
+	if (result.details && typeof result.details === "object") {
+		const ref = typeof result.details.ref === "string" ? `ref=${result.details.ref}` : "";
+		const offset = typeof result.details.offset === "number" ? `offset=${result.details.offset}` : "";
+		const limit = typeof result.details.limit === "number" ? `limit=${result.details.limit}` : "";
+		const returned = typeof result.details.returnedChars === "number" ? `returned=${result.details.returnedChars}` : "";
+		const bytes = typeof result.details.bytes === "number" ? `bytes=${result.details.bytes}` : "";
+		const found = typeof result.details.found === "boolean" ? `found=${result.details.found}` : "";
+		const parts = [ref, offset, limit, returned, bytes, found].filter(Boolean).join(" ");
+		if (parts) {
+			const prefix = result.toolName === "context_result_lookup" ? "[context_result_lookup" : `[${result.toolName ?? "toolResult"}`;
+			return `${prefix} ${parts}]`;
+		}
+	}
 	return JSON.stringify(result).slice(0, 5000);
 }
 
@@ -84,15 +99,15 @@ export function extractAssistantToolCalls(msg: any): Array<{ id?: string; name?:
 	return raw.map((tc: any) => {
 		const fn = tc?.function ?? {};
 		const structuredArgs = tc?.arguments ?? tc?.input;
+		const rawId = tc?.id ?? tc?.toolCallId ?? tc?.tool_call_id ?? tc?.callId ?? fn.name ?? tc?.name;
+		const rawArgs = fn.arguments ?? structuredArgs;
 		return {
-			id: tc?.id ?? tc?.toolCallId ?? tc?.tool_call_id ?? tc?.callId ?? fn.name ?? tc?.name,
+			id: rawId === undefined ? undefined : String(rawId),
 			name: fn.name ?? tc?.name ?? tc?.toolName ?? "unknown",
-			args: typeof fn.arguments === "string"
-				? fn.arguments
-				: typeof structuredArgs === "string"
-					? structuredArgs
-					: structuredArgs
-						? JSON.stringify(structuredArgs)
+			args: typeof rawArgs === "string"
+				? rawArgs
+				: rawArgs
+						? JSON.stringify(rawArgs)
 						: undefined,
 		};
 	});
@@ -143,8 +158,7 @@ export function captureTurnEndBatch(
 		});
 	}
 
-	pushPendingBatch(pruneState, turnIndex, toolCalls, callContext);
-	return toolCalls.length;
+	return pushPendingBatch(pruneState, turnIndex, toolCalls, callContext);
 }
 
 /**
@@ -222,16 +236,6 @@ export function captureBatches(
 					existing.result = toolResultText(msg);
 				}
 			}
-		} else if (msg.role === "user" && inToolSequence) {
-			// End of tool call sequence
-			if (hasNewTools && currentBatch.length > 0) {
-				pushPendingBatch(pruneState, batchTurnIndex, currentBatch, batchContext);
-			}
-			currentBatch = [];
-			batchContext = undefined;
-			inToolSequence = false;
-			const context = extractMessageContext(msg);
-			if (context) dialogueSinceLastTool.push(`user: ${context}`);
 		} else if (msg.role === "user" || msg.role === "assistant") {
 			const context = extractMessageContext(msg);
 			if (context) dialogueSinceLastTool.push(`${msg.role}: ${context}`);

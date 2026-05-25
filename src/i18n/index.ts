@@ -1,31 +1,52 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { de } from "./locales/de.ts";
-import { en } from "./locales/en.ts";
-import { es } from "./locales/es.ts";
-import { fr } from "./locales/fr.ts";
-import { pt } from "./locales/pt.ts";
-import { ptBR } from "./locales/pt-br.ts";
-import { ru } from "./locales/ru.ts";
-import { uk } from "./locales/uk.ts";
-import { zhCN } from "./locales/zh-cn.ts";
 import { I18N_NAMESPACE, type LocaleMessages, type Messages } from "./types.ts";
 
 export { I18N_LOCALES, I18N_NAMESPACE, type Locale, type Messages } from "./types.ts";
-export { de, en, es, fr, pt, ptBR, ru, uk, zhCN };
 
-export const messages: LocaleMessages = {
-	de,
-	en,
-	es,
-	fr,
-	pt,
-	"pt-BR": ptBR,
-	ru,
-	uk,
-	"zh-CN": zhCN,
-};
+const LOCALE_FILES = {
+	de: "de.json",
+	en: "en.json",
+	es: "es.json",
+	fr: "fr.json",
+	pt: "pt.json",
+	"pt-BR": "pt-br.json",
+	ru: "ru.json",
+	uk: "uk.json",
+	"zh-CN": "zh-cn.json",
+} as const;
+
+function sortMessages(messages: Messages): Messages {
+	return Object.freeze(Object.fromEntries(Object.entries(messages).sort(([left], [right]) => left.localeCompare(right))));
+}
+
+function loadLocale(file: string): Messages {
+	const url = new URL(`./locales/${file}`, import.meta.url);
+	return sortMessages(JSON.parse(readFileSync(url, "utf8")) as Record<string, string>);
+}
+
+export const messages: LocaleMessages = Object.freeze({
+	de: loadLocale(LOCALE_FILES.de),
+	en: loadLocale(LOCALE_FILES.en),
+	es: loadLocale(LOCALE_FILES.es),
+	fr: loadLocale(LOCALE_FILES.fr),
+	pt: loadLocale(LOCALE_FILES.pt),
+	"pt-BR": loadLocale(LOCALE_FILES["pt-BR"]),
+	ru: loadLocale(LOCALE_FILES.ru),
+	uk: loadLocale(LOCALE_FILES.uk),
+	"zh-CN": loadLocale(LOCALE_FILES["zh-CN"]),
+});
+
+export const de = messages.de;
+export const en = messages.en;
+export const es = messages.es;
+export const fr = messages.fr;
+export const pt = messages.pt;
+export const ptBR = messages["pt-BR"];
+export const ru = messages.ru;
+export const uk = messages.uk;
+export const zhCN = messages["zh-CN"];
 
 type Runtime = {
 	registry: Map<string, Map<string, Messages>>;

@@ -146,14 +146,14 @@ export function registerTimelineTool(input: any): void {
 	const pi = input?.pi ?? input;
 	const getState: (() => RuntimeState) | undefined = input?.getState;
 	const TimelineParams = Type.Object({
-		limit: Type.Optional(Type.Number({ description: "Max entries to show (default: 50)." })),
-		verbose: Type.Optional(Type.Boolean({ description: "Show all messages including collapsed tool calls (default: false)." })),
+		limit: Type.Optional(Type.Number({ description: t("tool.timeline.param.limit") })),
+		verbose: Type.Optional(Type.Boolean({ description: t("tool.timeline.param.verbose") })),
 	});
 
 	pi.registerTool?.({
 		name: "context_timeline",
-		label: "Context Timeline",
-		description: "Show session history as an ASCII tree with checkpoint labels, cache checkpoint markers, and context usage HUD.",
+		label: t("tool.timeline.label"),
+		description: t("tool.timeline.longDescription"),
 		parameters: TimelineParams,
 		async execute(_id: string, params: Static<typeof TimelineParams>, _signal: any, _onUpdate: any, ctx: any) {
 			const text = await buildTimeline(pi, ctx, {

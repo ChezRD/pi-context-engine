@@ -11,6 +11,8 @@ import { captureBatches, captureTurnEndBatch, hasAssistantToolCalls, shouldTrigg
 import { recordPruneSummarizeImpact } from "../projection/prune-impact.ts";
 import { appendPruneDebugEntry, persistTelemetry } from "../telemetry-persistence.ts";
 import { isReplacementSummaryEfficient } from "../projection/tool-pruner.ts";
+import { emitPruneSummaryMessage } from "../projection/prune-tool.ts";
+import { rebuildPrunedContextFromSession } from "../projection/rebuild.ts";
 
 function notify(ctx: any, text: string, level: "info" | "warning" | "error" = "warning"): void {
 	ctx?.ui?.notify?.(text, level);
@@ -151,7 +153,7 @@ async function runAutoPrune(pi: any, ctx: any, state: RuntimeState, event?: any)
 	// Pillar 1.1: Batch capture + auto-pruning
 	if (state.config.pruneEnabled) {
 		try {
-			const skipIds = [...state.engine.prune.summarizedIds, ...(state.engine.prune.skippedOversizedIds ?? [])];
+			const skipIds = [...state.engine.prune.summarizedIds, ...state.engine.prune.appliedIds, ...(state.engine.prune.skippedOversizedIds ?? []), ...(state.engine.prune.skippedMissingResultIds ?? [])];
 			const capturedFromTurnEnd = captureTurnEndBatch(event, skipIds, state.engine.prune, state.engine.turnIndex);
 			const branch = await ctx?.sessionManager?.getBranch?.();
 			let lastAssistant = event?.message?.role === "assistant" ? event.message : undefined;
@@ -168,92 +170,16 @@ async function runAutoPrune(pi: any, ctx: any, state: RuntimeState, event?: any)
 			const checkpointTriggered = state.config.pruneOn === "checkpoint" && rawCheckpointTriggered;
 			if (rawCheckpointTriggered) state.engine.prune.checkpointTriggered = false;
 
+			if (state.config.pruneOn === "agent-message") {
+				const target = Math.max(1, state.config.pruneBatchSize);
+				state.engine.prune.awaitingAgentMessage = hasPendingTools && state.engine.prune.batchStepCounter >= target;
+				persistTelemetry(pi, state);
+				return;
+			}
+
 			if (checkpointTriggered || shouldTriggerPrune(state.config.pruneOn, state.engine.prune.batchStepCounter, state.config.pruneBatchSize, hasPendingTools, lastAssistantPureText)) {
-				const { summarizeToolBatchPool } = await import("../projection/tool-pruner.ts");
-				if (state.engine.prune.pendingBatches.length > 0) {
-					const pool = await summarizeToolBatchPool(pi, state.engine.prune.pendingBatches, {
-						enabled: true,
-						pruneOn: state.config.pruneOn as any,
-						summarizerModel: state.config.pruneModel,
-						includeContext: state.config.pruneIncludeContext,
-					}, { signal: ctx.signal, ctx });
-					recordPruneSummarizeImpact(state, pool.metrics);
-					if (state.config.diagnostics) {
-						state.engine.prune.impact.lastSummarizePrompt = pool.debug?.prompt;
-						state.engine.prune.impact.lastSummarizeResponse = pool.debug?.responseText;
-						state.engine.prune.impact.lastAcceptedSummaries = pool.debug?.acceptedSummaries;
-						state.engine.prune.impact.lastSummarizeMaxTokens = pool.debug?.maxTokens;
-					}
-					if (pool.metrics.requests > 0) persistTelemetry(pi, state);
-					if (pool.metrics.requests === 0) {
-						notify(ctx, t("engine.prune.failed", { error: pool.metrics.error ?? "summary request did not run" }), "warning");
-						persistTelemetry(pi, state);
-						return;
-					}
-					const results = pool.results;
-
-					let summarized = 0;
-					let skippedOversized = 0;
-					for (let i = 0; i < state.engine.prune.pendingBatches.length; i++) {
-						const result = results[i];
-						if (result) {
-							const batch = state.engine.prune.pendingBatches[i];
-							if (!isReplacementSummaryEfficient(batch, result.summaryText)) {
-								state.engine.prune.skippedOversizedIds ??= [];
-								for (const tc of batch.toolCalls) {
-									if (!state.engine.prune.skippedOversizedIds.includes(tc.id)) {
-										state.engine.prune.skippedOversizedIds.push(tc.id);
-										skippedOversized++;
-									}
-								}
-								continue;
-							}
-
-							let wroteSummaryForBatch = false;
-							for (const tc of batch.toolCalls) {
-								if (!state.engine.prune.summarizedIds.includes(tc.id)) {
-									state.engine.prune.summarizedIds.push(tc.id);
-									const summaryText = wroteSummaryForBatch ? undefined : result.summaryText;
-									state.toolIndexer.markSummarized(tc.id, tc.name, tc.turnIndex, summaryText);
-									state.engine.prune.summarizedRecords ??= [];
-									state.engine.prune.summarizedRecords.push({ toolCallId: tc.id, toolName: tc.name, turnIndex: tc.turnIndex, summarized: true, summaryText });
-									wroteSummaryForBatch = true;
-									summarized++;
-								}
-							}
-						}
-					}
-					if (state.config.persistDiagnostics && pool.metrics.requests > 0) {
-						appendPruneDebugEntry(pi, {
-							turn: state.engine.turnIndex,
-							mode: state.config.pruneOn,
-							model: state.config.pruneModel,
-							outcome: summarized > 0 ? "summarized" : skippedOversized > 0 ? "skipped-oversized" : "failed",
-							batches: state.engine.prune.pendingBatches.length,
-							toolCalls: pool.metrics.toolCalls,
-							summarized,
-							skippedOversized,
-							rawChars: pool.metrics.rawChars ?? 0,
-							summaryChars: pool.metrics.summaryChars ?? 0,
-							cost: pool.metrics.cost,
-							maxTokens: pool.debug?.maxTokens,
-							prompt: pool.debug?.prompt,
-							response: pool.debug?.responseText,
-							acceptedSummaries: pool.debug?.acceptedSummaries,
-							error: pool.metrics.error,
-						});
-					}
-					if (summarized > 0 || skippedOversized > 0) {
-						state.engine.prune.pendingBatches = [];
-						state.engine.prune.batchStepCounter = 0;
-						if (summarized > 0) notify(ctx, t("engine.prune.triggered", { count: summarized }), "info");
-						if (skippedOversized > 0) notify(ctx, t("engine.prune.failed", { error: `skipped ${skippedOversized} oversized tool calls` }), "warning");
-						persistTelemetry(pi, state);
-					} else {
-						notify(ctx, t("engine.prune.failed", { error: "summary response did not contain usable summaries" }), "warning");
-						persistTelemetry(pi, state);
-					}
-				}
+				notify(ctx, t(state.config, "tool.prune.started"), "info");
+				await flushPendingPrune(pi, ctx, state);
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -261,5 +187,124 @@ async function runAutoPrune(pi: any, ctx: any, state: RuntimeState, event?: any)
 			notify(ctx, t("engine.prune.failed", { error: message }), "warning");
 			persistTelemetry(pi, state);
 		}
+	}
+}
+
+function isFinalAssistantMessage(message: any): boolean {
+	return message?.role === "assistant" && !hasAssistantToolCalls(message);
+}
+
+export async function handleAgentMessagePrune(pi: any, ctx: any, state: RuntimeState, event?: any): Promise<void> {
+	if (!state.config.enabled || !state.config.pruneEnabled || state.config.pruneOn !== "agent-message") return;
+	if (!isFinalAssistantMessage(event?.message ?? event)) return;
+	const target = Math.max(1, state.config.pruneBatchSize);
+	const hasPendingTools = state.engine.prune.pendingBatches.some((batch) => batch.toolCalls.length > 0);
+	if (!hasPendingTools || state.engine.prune.batchStepCounter < target) return;
+	state.engine.prune.awaitingAgentMessage = false;
+	notify(ctx, t(state.config, "tool.prune.started"), "info");
+	await flushPendingPrune(pi, ctx, state);
+}
+
+async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promise<void> {
+	if (state.engine.prune.pendingBatches.length === 0) return;
+	const { summarizeToolBatchPool } = await import("../projection/tool-pruner.ts");
+	const pool = await summarizeToolBatchPool(pi, state.engine.prune.pendingBatches, {
+		enabled: true,
+		pruneOn: state.config.pruneOn as any,
+		summarizerModel: state.config.pruneModel,
+		includeContext: state.config.pruneIncludeContext,
+	}, { signal: ctx.signal, ctx });
+	recordPruneSummarizeImpact(state, pool.metrics);
+	if (state.config.diagnostics) {
+		state.engine.prune.impact.lastSummarizePrompt = pool.debug?.prompt;
+		state.engine.prune.impact.lastSummarizeResponse = pool.debug?.responseText;
+		state.engine.prune.impact.lastAcceptedSummaries = pool.debug?.acceptedSummaries;
+		state.engine.prune.impact.lastSummarizeMaxTokens = pool.debug?.maxTokens;
+	}
+	if (pool.metrics.requests > 0) persistTelemetry(pi, state);
+	if (pool.metrics.requests === 0) {
+		notify(ctx, t("engine.prune.failed", { error: pool.metrics.error ?? "summary request did not run" }), "warning");
+		persistTelemetry(pi, state);
+		return;
+	}
+	const results = pool.results;
+
+	let summarized = 0;
+	let skippedOversized = 0;
+	const acceptedSummaries: string[] = [];
+	for (let i = 0; i < state.engine.prune.pendingBatches.length; i++) {
+		const result = results[i];
+		if (result) {
+			const batch = state.engine.prune.pendingBatches[i];
+			if (!isReplacementSummaryEfficient(batch, result.summaryText)) {
+				state.engine.prune.skippedOversizedIds ??= [];
+				for (const tc of batch.toolCalls) {
+					if (!state.engine.prune.skippedOversizedIds.includes(tc.id)) {
+						state.engine.prune.skippedOversizedIds.push(tc.id);
+						skippedOversized++;
+					}
+				}
+				continue;
+			}
+
+			let wroteSummaryForBatch = false;
+			if (result.summaryText.trim()) acceptedSummaries.push(result.summaryText.trim());
+			for (const tc of batch.toolCalls) {
+				if (!state.engine.prune.summarizedIds.includes(tc.id)) {
+					state.engine.prune.summarizedIds.push(tc.id);
+					const summaryText = wroteSummaryForBatch ? undefined : result.summaryText;
+					state.toolIndexer.markSummarized(tc.id, tc.name, tc.turnIndex, summaryText);
+					state.engine.prune.summarizedRecords ??= [];
+					state.engine.prune.summarizedRecords.push({ toolCallId: tc.id, toolName: tc.name, turnIndex: tc.turnIndex, summarized: true, summaryText });
+					wroteSummaryForBatch = true;
+					summarized++;
+				}
+			}
+		}
+	}
+	if (acceptedSummaries.length > 0) {
+		emitPruneSummaryMessage(
+			pi,
+			ctx,
+			Array.from(new Set(acceptedSummaries)).join("\n\n"),
+			{ batches: state.engine.prune.pendingBatches.length, mode: state.config.pruneOn },
+		);
+	}
+	if (state.config.persistDiagnostics && pool.metrics.requests > 0) {
+		appendPruneDebugEntry(pi, {
+			turn: state.engine.turnIndex,
+			mode: state.config.pruneOn,
+			model: state.config.pruneModel,
+			outcome: summarized > 0 ? "summarized" : skippedOversized > 0 ? "skipped-oversized" : "failed",
+			batches: state.engine.prune.pendingBatches.length,
+			toolCalls: pool.metrics.toolCalls,
+			summarized,
+			skippedOversized,
+			rawChars: pool.metrics.rawChars ?? 0,
+			summaryChars: pool.metrics.summaryChars ?? 0,
+			cost: pool.metrics.cost,
+			maxTokens: pool.debug?.maxTokens,
+			prompt: pool.debug?.prompt,
+			response: pool.debug?.responseText,
+			acceptedSummaries: pool.debug?.acceptedSummaries,
+			error: pool.metrics.error,
+		});
+	}
+	if (summarized > 0 || skippedOversized > 0) {
+		state.engine.prune.pendingBatches = [];
+		state.engine.prune.batchStepCounter = 0;
+		state.engine.prune.awaitingAgentMessage = false;
+		if (summarized > 0) {
+			await rebuildPrunedContextFromSession(ctx, state, `${summarized} tool results pruned automatically`);
+			notify(ctx, t("engine.prune.triggered", { count: summarized }), "info");
+		}
+		if (skippedOversized > 0) notify(ctx, t("engine.prune.failed", { error: `skipped ${skippedOversized} oversized tool calls` }), "warning");
+		persistTelemetry(pi, state);
+	} else {
+		const target = Math.max(1, state.config.pruneBatchSize);
+		state.engine.prune.batchStepCounter = Math.max(0, target - 1);
+		state.engine.prune.awaitingAgentMessage = false;
+		notify(ctx, t("engine.prune.failed", { error: "summary response did not contain usable summaries" }), "warning");
+		persistTelemetry(pi, state);
 	}
 }

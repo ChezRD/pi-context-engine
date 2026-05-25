@@ -12,9 +12,12 @@ import { holdCompaction, requestCompact, requestFold } from "./cache-engine/inde
 import { openCacheCheckpoint } from "./cache-engine/cache-checkpoints.ts";
 import { openSettingsMenu } from "./ui/settings.ts";
 import { t } from "./i18n/index.ts";
-import { syncPruneToolActivation } from "./projection/prune-tool.ts";
+import { executePrune, syncPruneToolActivation } from "./projection/prune-tool.ts";
+import type { ToolCallIndexerInstance } from "./projection/indexer.ts";
+import { rebuildPrunedContextFromSession } from "./projection/rebuild.ts";
 
 export const COMMAND = "context-engine";
+export const PRUNE_COMMAND = "prune";
 
 const SUBCOMMANDS = [
 	{ value: "status", label: "status", descriptionKey: "cmd.status.description" },
@@ -22,6 +25,7 @@ const SUBCOMMANDS = [
 	{ value: "fold", label: "fold", descriptionKey: "cmd.fold.description" },
 	{ value: "compact", label: "compact", descriptionKey: "cmd.compact.description" },
 	{ value: "hold", label: "hold", descriptionKey: "cmd.hold.description" },
+	{ value: "prune", label: "prune", descriptionKey: "tool.prune.description" },
 	{ value: "config", label: "config", descriptionKey: "cmd.config.description" },
 	{ value: "reset-stats", label: "reset-stats", descriptionKey: "cmd.resetStats.description" },
 	{ value: "enable-capper", label: "enable-capper", descriptionKey: "cmd.enableCapper.description" },
@@ -29,7 +33,7 @@ const SUBCOMMANDS = [
 	{ value: "init", label: "init", descriptionKey: "cmd.init.description" },
 ] as const;
 
-const ARGUMENT_HINT = "status | diagnose | fold | compact | hold | config | reset-stats | enable-capper | disable-capper | init";
+const ARGUMENT_HINT = "status | diagnose | fold | compact | hold | prune | config | reset-stats | enable-capper | disable-capper | init";
 
 type NotifyLevel = "info" | "warning" | "error";
 interface CommandResult { text: string; level: NotifyLevel; }
@@ -41,38 +45,51 @@ export function getDeepSeekCacheCompletions(prefix: string): Array<{ value: stri
 	return filtered.length > 0 ? filtered.map((item) => ({ value: item.value, label: item.label, description: t(undefined, item.descriptionKey) })) : null;
 }
 
-export function registerCommands(pi: any, getCtx: () => any, state: RuntimeState, store: HugeResultStore): void {
+export function registerCommands(pi: any, getCtx: () => any, state: RuntimeState, store: HugeResultStore, indexer: ToolCallIndexerInstance): void {
 	const definition = {
 		description: t(undefined, "cmd.description"),
 		argumentHint: ARGUMENT_HINT,
 		getArgumentCompletions: getDeepSeekCacheCompletions,
-		handler: async (args: string, commandCtx?: any) => executeSubcommand(pi, getCtx, state, store, args, commandCtx),
+		handler: async (args: string, commandCtx?: any) => executeSubcommand(pi, getCtx, state, store, indexer, args, commandCtx),
 	};
 	pi.registerCommand(COMMAND, definition);
+	pi.registerCommand(PRUNE_COMMAND, {
+		description: t(undefined, "tool.prune.description"),
+		handler: async (_args: string, commandCtx?: any) => {
+			const ctx = commandCtx ?? getCtx();
+			state.config = readConfig();
+			state.detection = detectDeepSeekModel(ctx?.model);
+			state.contextPct = await readContextPercent(ctx);
+			const result = await pruneNow(pi, ctx, state, indexer);
+			notifyCommand(ctx, result.text, result.level);
+			return result.text;
+		},
+	});
 }
 
 function splitArgs(args: string | undefined): string[] {
 	return String(args ?? "").trim().split(/\s+/).filter(Boolean);
 }
 
-async function executeSubcommand(pi: any, getCtx: () => any, state: RuntimeState, store: HugeResultStore, args: string | undefined, commandCtx?: any): Promise<string> {
+async function executeSubcommand(pi: any, getCtx: () => any, state: RuntimeState, store: HugeResultStore, indexer: ToolCallIndexerInstance, args: string | undefined, commandCtx?: any): Promise<string> {
 	const ctx = commandCtx ?? getCtx();
 	const parts = splitArgs(args);
 	state.config = readConfig();
 	state.detection = detectDeepSeekModel(ctx?.model);
 	state.contextPct = await readContextPercent(ctx);
-	const result = await runSubcommand(pi, ctx, state, store, parts[0] ?? "status", parts.slice(1));
+	const result = await runSubcommand(pi, ctx, state, store, indexer, parts[0] ?? "status", parts.slice(1));
 	notifyCommand(ctx, result.text, result.level);
 	return result.text;
 }
 
-async function runSubcommand(pi: any, ctx: any, state: RuntimeState, store: HugeResultStore, sub: string, args: string[]): Promise<CommandResult> {
+async function runSubcommand(pi: any, ctx: any, state: RuntimeState, store: HugeResultStore, indexer: ToolCallIndexerInstance, sub: string, args: string[]): Promise<CommandResult> {
 	switch (sub) {
 		case "status": return { text: buildStatus(pi, state), level: "info" };
 		case "diagnose": return { text: buildDiagnose(pi, state), level: "info" };
 		case "fold": return await foldNow(pi, ctx, state);
 		case "compact": return compactNow(ctx, state);
 		case "hold": return holdNow(state);
+		case "prune": return await pruneNow(pi, ctx, state, indexer);
 		case "config": return await configNow(pi, ctx, state);
 		case "reset-stats":
 			openCacheCheckpoint(state, "manual_reset", { startSegment: true });
@@ -114,6 +131,60 @@ export function ensureLookupTool(pi: any, store: HugeResultStore, state: Runtime
 async function foldNow(pi: any, ctx: any, state: RuntimeState): Promise<CommandResult> {
 	const result = await requestFold(pi, ctx, state);
 	return result.ok ? { text: t(state.config, "cmd.fold.done"), level: "info" } : { text: t(state.config, "cmd.failed", { error: result.error }), level: "error" };
+}
+
+async function pruneNow(pi: any, ctx: any, state: RuntimeState, indexer: ToolCallIndexerInstance): Promise<CommandResult> {
+	notifyCommand(ctx, t(state.config, "tool.prune.started"), "info");
+	const result = await executePrune(pi, ctx, indexer, state, "auto");
+	if ((result.details?.summarized ?? 0) > 0) {
+		await rebuildPrunedContextFromSession(ctx, state, `${result.details.summarized} tool results pruned by /prune`);
+	}
+	setStatus(ctx, state);
+	return { text: formatPruneCommandText(state, result), level: pruneResultLevel(result.details) };
+}
+
+function formatPruneCommandText(state: RuntimeState, result: { text: string; details?: Record<string, any> }): string {
+	const details = result.details;
+	if (!details || (details.summarized ?? 0) > 0) return result.text;
+	if (details.reason === "none_found") {
+		const scan = details.scan ?? {};
+		return [
+			result.text,
+			t(state.config, "tool.prune.noneFoundDetails", {
+				seen: scan.seen ?? 0,
+				summarized: scan.summarized ?? 0,
+				applied: scan.applied ?? 0,
+				skipped: (scan.skippedOversized ?? 0) + (scan.skippedMissingResult ?? 0),
+				unhandled: scan.unhandled ?? 0,
+			}),
+		].join("\n");
+	}
+	const reason = details.error ?? details.reason ?? "unknown";
+	return [
+		result.text,
+		t(state.config, "tool.prune.diagnostics", {
+			reason,
+			attempted: details.attempted ?? 0,
+			batches: details.batches ?? 0,
+			requests: details.summaryRequests ?? 0,
+			model: details.modelId ?? state.config.pruneModel,
+		}),
+		t(state.config, "tool.prune.io", {
+			raw: details.rawChars ?? 0,
+			summary: details.summaryChars ?? 0,
+			prompt: details.promptChars ?? 0,
+			response: details.responseChars ?? 0,
+			accepted: details.acceptedSummaries ?? 0,
+		}),
+		t(state.config, "tool.prune.trace"),
+	].join("\n");
+}
+
+function pruneResultLevel(details: Record<string, any> | undefined): NotifyLevel {
+	if (!details) return "warning";
+	if ((details.summarized ?? 0) > 0) return "info";
+	if (details.reason === "none_found") return "warning";
+	return "warning";
 }
 
 function compactNow(ctx: any, state: RuntimeState): CommandResult {

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 
 import { applyLocale, detectLocale, getActiveLocale, I18N_LOCALES, messages, parseLangEnv, t } from "../src/i18n/index.ts";
 
@@ -17,6 +18,26 @@ test("all registered locales have full key coverage and no empty strings", () =>
     for (const [key, value] of Object.entries(messages[locale])) {
       assert.notEqual(value, "", `${locale}.${key} must not be empty`);
     }
+  }
+});
+
+test("locale json files stay normalized and key-sorted", () => {
+  const fileByLocale = {
+    de: "de.json",
+    en: "en.json",
+    es: "es.json",
+    fr: "fr.json",
+    pt: "pt.json",
+    "pt-BR": "pt-br.json",
+    ru: "ru.json",
+    uk: "uk.json",
+    "zh-CN": "zh-cn.json",
+  };
+  for (const locale of I18N_LOCALES) {
+    const path = new URL(`../src/i18n/locales/${fileByLocale[locale]}`, import.meta.url);
+    const raw = readFileSync(path, "utf8");
+    const normalized = `${JSON.stringify(messages[locale], null, 2)}\n`;
+    assert.equal(raw, normalized, `${locale} locale file must stay sorted and normalized`);
   }
 });
 

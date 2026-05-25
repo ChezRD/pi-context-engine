@@ -49,6 +49,7 @@ export interface SummarizePoolMetrics {
 	requests: number;
 	inputTokens: number;
 	outputTokens: number;
+	cacheReadTokens?: number;
 	cost: number;
 	batches: number;
 	toolCalls: number;
@@ -99,8 +100,10 @@ export interface PruneState {
 	pendingSummaries: string[];
 	summarizedIds: string[];
 	skippedOversizedIds?: string[];
+	skippedMissingResultIds?: string[];
 	batchStepCounter: number;
 	checkpointTriggered?: boolean;
+	awaitingAgentMessage?: boolean;
 }
 
 export interface ToolPruneConfig {
@@ -108,6 +111,15 @@ export interface ToolPruneConfig {
 	pruneOn: PruneOn;
 	summarizerModel: string;
 	includeContext?: boolean;
+	promptOverride?: string;
+	carryForwardInventory?: Array<{
+		source_ref: string;
+		seen_in_prior_request: true;
+		observed_offsets: number[];
+		total_chars?: number;
+		total_bytes?: number;
+		subject_hint?: string;
+	}>;
 }
 
 export const DEFAULT_TOOL_PRUNE_CONFIG: ToolPruneConfig = {

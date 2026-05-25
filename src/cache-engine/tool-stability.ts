@@ -22,7 +22,7 @@ export function detectTextualToolCall(message: any): boolean {
 	if (/```(?:json|typescript|ts|javascript|js)?[\s\S]*?(?:function\s*call|tool_call|context_result_lookup)[\s\S]*?```/i.test(content)) return false;
 	if (/\b(?:example|пример|schema|схем[аы]|parameters|параметр[ыов]?|можно вызывать|смогу вызывать)\b/i.test(withoutCode)) return false;
 	if (/\bcontext_result_lookup\s*\(/i.test(withoutCode) && !/\b(?:call|invoke|run|use|вызови|запусти|используй)\b/i.test(withoutCode)) return false;
-	return /(<tool_use|tool_call|```tool|call\s+(?:the\s+)?tool|function\s*call\s*[:{(])/i.test(withoutCode);
+	return /(<tool_use|tool_call|```tool|call\s+(?:the\s+)?tool|function\s*call\s*[:{(]|\b(?:call|invoke|run|use)\s+(?:the\s+)?(?:tool|function)\s+[a-zA-Z_][\w.-]*|(?:^|[^\p{L}\p{N}_])(?:вызови|запусти|используй)\s+(?:инструмент|функцию)\s+[A-Za-z_][\w.-]*)/iu.test(withoutCode);
 }
 
 export function handleToolCall(event: any, _ctx: any, state: RuntimeState): any | undefined {

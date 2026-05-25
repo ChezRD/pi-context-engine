@@ -7,7 +7,7 @@ export function registerFoldTool(pi: any, state: RuntimeState): void {
 	if (state.engine.foldToolRegistered) return;
 	if (!state.config.enabled || !state.config.autoFold) return;
 	pi.registerTool?.({
-		name: "deepseek_cache_fold",
+		name: "context_cache_fold",
 		label: t("tool.fold.label"),
 		description: t("tool.fold.description"),
 		promptSnippet: t("tool.fold.promptSnippet"),
