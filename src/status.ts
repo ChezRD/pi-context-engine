@@ -80,7 +80,7 @@ export function buildStatus(pi: any, state: RuntimeState): string {
 		`  ${t(state.config, "status.engineLine", { prefixDrifts: state.engine.prefixDriftCount, rewrites: state.engine.historyRewriteCount, decision: formatDecision(state) })}`,
 		`  ${t(state.config, "status.hashLine", { prefixHash: state.engine.prefixHash?.slice(0, 12) ?? t(state.config, "status.unknown"), toolHash: state.engine.toolHash?.slice(0, 12) ?? t(state.config, "status.unknown"), tools: state.engine.toolHashChanges, reason: state.engine.lastPrefixChangeReason ? formatPrefixReason(state.config, state.engine.lastPrefixChangeReason, "detail") : t(state.config, "status.notReported") })}`,
 		`  ${t(state.config, "status.prefixNotification", { turn: state.engine.lastPrefixWarningTurn ?? t(state.config, "status.notReported"), suppressed: state.engine.lastPrefixNotificationSuppressed ? t(state.config, "status.yes") : t(state.config, "status.no") })}`,
-		`  ${t(state.config, "status.projectionLine", { active: state.engine.appendOnly.projectionActive ? t(state.config, "status.enabled") : t(state.config, "status.disabled"), tail: state.engine.appendOnly.tailStartEntryId ?? t(state.config, "status.notReported"), reason: state.engine.appendOnly.invalidatedReason ?? t(state.config, "status.notReported") })}`,
+		`  ${t(state.config, "status.projectionLine", { active: state.engine.appendOnly.projectionActive ? t(state.config, "status.enabled") : t(state.config, "status.disabled"), tail: state.engine.appendOnly.tailStartEntryId ?? t(state.config, "status.notReported"), reason: state.engine.appendOnly.invalidatedReasonKey ? t(state.config, state.engine.appendOnly.invalidatedReasonKey) : t(state.config, "status.notReported") })}`,
 		`  ${formatEligibility(pi, state)}`,
 	].join("\n");
 }
@@ -248,7 +248,7 @@ function formatConfigDetails(pi: any, state: RuntimeState): string {
 		`  ${t(state.config, "status.engineLine", { prefixDrifts: state.engine.prefixDriftCount, rewrites: state.engine.historyRewriteCount, decision: formatDecision(state) })}`,
 		`  ${t(state.config, "status.hashLine", { prefixHash: state.engine.prefixHash?.slice(0, 12) ?? t(state.config, "status.unknown"), toolHash: state.engine.toolHash?.slice(0, 12) ?? t(state.config, "status.unknown"), tools: state.engine.toolHashChanges, reason: state.engine.lastPrefixChangeReason ? formatPrefixReason(state.config, state.engine.lastPrefixChangeReason, "detail") : t(state.config, "status.notReported") })}`,
 		`  ${t(state.config, "status.prefixNotification", { turn: state.engine.lastPrefixWarningTurn ?? t(state.config, "status.notReported"), suppressed: state.engine.lastPrefixNotificationSuppressed ? t(state.config, "status.yes") : t(state.config, "status.no") })}`,
-		`  ${t(state.config, "status.projectionLine", { active: state.engine.appendOnly.projectionActive ? t(state.config, "status.enabled") : t(state.config, "status.disabled"), tail: state.engine.appendOnly.tailStartEntryId ?? t(state.config, "status.notReported"), reason: state.engine.appendOnly.invalidatedReason ?? t(state.config, "status.notReported") })}`,
+		`  ${t(state.config, "status.projectionLine", { active: state.engine.appendOnly.projectionActive ? t(state.config, "status.enabled") : t(state.config, "status.disabled"), tail: state.engine.appendOnly.tailStartEntryId ?? t(state.config, "status.notReported"), reason: state.engine.appendOnly.invalidatedReasonKey ? t(state.config, state.engine.appendOnly.invalidatedReasonKey) : t(state.config, "status.notReported") })}`,
 		`  ${formatEligibility(pi, state)}`,
 		`  ${formatCompactionHistory(state)}`,
 	].join("\n");
@@ -315,8 +315,8 @@ function formatPruneDetails(state: RuntimeState): string {
 		applied: impact.lastRebuildNewlyApplied ?? 0,
 		saved: formatTokenCount(impact.lastRebuildSavedApproxChars ?? 0),
 		checkpoint: impact.lastRebuildCheckpointOpened ? t(state.config, "status.yes") : t(state.config, "status.no"),
-		reason: impact.lastRebuildReason ?? t(state.config, "status.notReported"),
+		reason: impact.lastRebuildReasonKey ? t(state.config, impact.lastRebuildReasonKey) : t(state.config, "status.notReported"),
 	})}`;
-	const error = impact.lastError ? `\n  ${t(state.config, "status.pruneError", { error: impact.lastError })}` : "";
+	const error = impact.lastErrorKey ? `\n  ${t(state.config, "status.pruneError", { error: t(state.config, impact.lastErrorKey) })}` : "";
 	return `${base}\n  ${summary}\n  ${slice}${rebuild}\n  ${miss}\n  ${regret}\n  ${preserved}${error}`;
 }

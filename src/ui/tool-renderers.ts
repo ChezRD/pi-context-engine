@@ -9,6 +9,7 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import { extractToolResultText, type HugeResultStore, renderStoredHugeResult } from "../capper.ts";
+import { t } from "../i18n/index.ts";
 
 type BuiltInTools = ReturnType<typeof createBuiltInTools>;
 type BuiltInToolName = keyof BuiltInTools;
@@ -50,11 +51,11 @@ function renderPlainResult(result: any, expanded: boolean, theme: any): Text {
 	if (!text) return new Text("", 0, 0);
 	const lines = text.split(/\r?\n/);
 	if (!expanded) {
-		const suffix = lines.length > 1 ? ` (${lines.length} lines)` : "";
+		const suffix = lines.length > 1 ? ` (${t("ui.tool.lines", { count: lines.length })})` : "";
 		return new Text(theme.fg("muted", firstTextLine(result).slice(0, 160) + suffix), 0, 0);
 	}
 	const visible = lines.slice(0, 40).join("\n");
-	const tail = lines.length > 40 ? `\n${theme.fg("muted", `... ${lines.length - 40} more lines`)}` : "";
+	const tail = lines.length > 40 ? `\n${theme.fg("muted", t("ui.tool.moreLines", { count: lines.length - 40 }))}` : "";
 	return new Text(theme.fg("toolOutput", visible) + tail, 0, 0);
 }
 

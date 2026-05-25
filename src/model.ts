@@ -1,4 +1,5 @@
 import type { DeepSeekDetection } from "./types.ts";
+import { t } from "./i18n/index.ts";
 
 function lower(value: unknown): string {
 	return typeof value === "string" ? value.toLowerCase() : "";
@@ -20,18 +21,18 @@ export function detectDeepSeekModel(model: any): DeepSeekDetection {
 
 	if (thinkingFormat === "deepseek") {
 		if (!requiresReasoning && (model?.reasoning === true || id.includes("v4") || id.includes("reasoner"))) {
-			warnings.push("DeepSeek thinking model should set compat.requiresReasoningContentOnAssistantMessages=true.");
+			warnings.push(t("model.warning.requiresReasoningContent"));
 		}
 		const map = model?.thinkingLevelMap ?? {};
 		if ((id.includes("v4") || id.includes("reasoner")) && (map.high !== "high" || map.xhigh !== "max")) {
-			warnings.push("DeepSeek thinkingLevelMap should map high->high and xhigh->max.");
+			warnings.push(t("model.warning.thinkingLevelMap"));
 		}
 		return { kind: provider === "deepseek" ? "native" : "compatible", ok: warnings.length === 0, warnings, modelId: model?.id, provider: model?.provider };
 	}
 
 	if (mentionsDeepSeek) {
-		warnings.push("Model looks like DeepSeek but lacks compat.thinkingFormat='deepseek'.");
-		if (model?.reasoning === true && !requiresReasoning) warnings.push("Reasoning DeepSeek model should preserve assistant reasoning_content.");
+		warnings.push(t("model.warning.missingThinkingFormat"));
+		if (model?.reasoning === true && !requiresReasoning) warnings.push(t("model.warning.reasoningContent"));
 		return { kind: "misconfigured", ok: false, warnings, modelId: model?.id, provider: model?.provider };
 	}
 

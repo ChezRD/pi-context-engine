@@ -46,7 +46,7 @@ function handledReason(id: string, indexer: ToolCallIndexerInstance, state?: Run
 	return undefined;
 }
 
-function clearLastSummarizerAttempt(state: RuntimeState, error?: string): void {
+function clearLastSummarizerAttempt(state: RuntimeState, errorKey?: string): void {
 	const impact = state.engine.prune.impact;
 	impact.lastSummarizePrompt = undefined;
 	impact.lastSummarizeResponse = undefined;
@@ -56,8 +56,8 @@ function clearLastSummarizerAttempt(state: RuntimeState, error?: string): void {
 	impact.lastSummarizeToolCalls = 0;
 	impact.lastSummarizeRawChars = 0;
 	impact.lastSummarizeSummaryChars = 0;
-	if (error) impact.lastError = error;
-	else delete impact.lastError;
+	if (errorKey) impact.lastErrorKey = errorKey;
+	else delete impact.lastErrorKey;
 }
 
 export async function executePrune(
@@ -145,12 +145,12 @@ export async function executePrune(
 			for (const id of missingResultIds) {
 				if (!runtimeState.engine.prune.skippedMissingResultIds.includes(id)) runtimeState.engine.prune.skippedMissingResultIds.push(id);
 			}
-			clearLastSummarizerAttempt(runtimeState, "missing_tool_results");
+			clearLastSummarizerAttempt(runtimeState, "engine.prune.error.missingToolResults");
 			persistTelemetry(pi, runtimeState);
 		}
 		return {
 			text: t("tool.prune.noneSummarized"),
-			details: { reason: "missing_tool_results", summarized: 0, skippedOversized: 0, attempted: missingResults, missingResults, batches: batches.length, summaryRequests: 0, scan, error: "tool calls have no replayable tool results in restored session branch" },
+			details: { reason: "missing_tool_results", summarized: 0, skippedOversized: 0, attempted: missingResults, missingResults, batches: batches.length, summaryRequests: 0, scan, errorKey: "engine.prune.error.missingToolResults" },
 		};
 	}
 
@@ -226,7 +226,7 @@ export async function executePrune(
 			{ batches: usableBatches.length, mode: "manual-prune" },
 		);
 	}
-	if (runtimeState?.config.persistDiagnostics && (pool.metrics.requests > 0 || pool.metrics.error || pool.debug)) {
+	if (runtimeState?.config.persistDiagnostics && (pool.metrics.requests > 0 || pool.metrics.errorKey || pool.debug)) {
 		appendPruneDebugEntry(pi, {
 			turn: runtimeState.engine.turnIndex,
 			mode: "manual-prune",
@@ -244,7 +244,7 @@ export async function executePrune(
 			prompt: pool.debug?.prompt,
 			response: pool.debug?.responseText,
 			acceptedSummaries: pool.debug?.acceptedSummaries,
-			error: pool.metrics.error,
+			errorKey: pool.metrics.errorKey,
 		});
 	}
 	if (runtimeState) persistTelemetry(pi, runtimeState);
@@ -269,7 +269,7 @@ export async function executePrune(
 			maxTokens: pool.debug?.maxTokens,
 			scan,
 			reason: summarized > 0 ? "summarized" : skippedOversized > 0 ? "skipped_oversized" : "none_summarized",
-			error: pool.metrics.error ?? (summarized === 0 && skippedOversized === 0 ? "summary response did not contain usable summaries" : undefined),
+			errorKey: pool.metrics.errorKey ?? (summarized === 0 && skippedOversized === 0 ? "engine.prune.error.noUsableSummaries" : undefined),
 		},
 	};
 }

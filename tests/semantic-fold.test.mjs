@@ -123,7 +123,7 @@ describe("estimateFoldBoundary", () => {
 	it("returns ok=false when no messages", () => {
 		const result = estimateFoldBoundary([], 0, 1000);
 		assert.equal(result.ok, false);
-		assert.equal(result.reason, "No messages");
+		assert.equal(result.reasonKey, "engine.fold.reason.noMessages");
 	});
 
 	it("skips fold when head too small", () => {
@@ -624,7 +624,7 @@ describe("semanticFold integration", () => {
 				{ config: { foldThreshold: 0.75, aggressiveFoldThreshold: 0.78, exitSummaryThreshold: 0.80, preflightFoldThreshold: 0.90, foldTailPct: 0.2, aggressiveFoldTailPct: 0.1, minFoldSavings: 0.3, foldTimeoutMs: 5000, foldSummaryModel: "test", semanticFoldMarker: "<fold>" }, engine: { semanticFold: { active: false } } },
 				{},
 			);
-			assert.deepEqual(result, { ok: false, reason: "Cannot access session branch" });
+			assert.deepEqual(result, { ok: false, reasonKey: "engine.fold.reason.sessionBranchUnavailable" });
 		});
 
 		it("semanticFold returns ok=false for an empty branch", async () => {
@@ -634,7 +634,7 @@ describe("semanticFold integration", () => {
 				{ config: { foldTailPct: 0.2, aggressiveFoldTailPct: 0.1, minFoldSavings: 0, foldTimeoutMs: 5000, foldSummaryModel: "test", semanticFoldMarker: "<fold>" }, engine: { semanticFold: { active: false } } },
 				{},
 			);
-			assert.deepEqual(result, { ok: false, reason: "No session entries" });
+			assert.deepEqual(result, { ok: false, reasonKey: "engine.fold.reason.noSessionEntries" });
 		});
 
 		it("semanticFold returns ok=false when trimming trailing tool calls leaves no messages", async () => {
@@ -649,7 +649,7 @@ describe("semanticFold integration", () => {
 				{ config: { foldTailPct: 0.2, aggressiveFoldTailPct: 0.1, minFoldSavings: 0, foldTimeoutMs: 5000, foldSummaryModel: "test", semanticFoldMarker: "<fold>" }, engine: { semanticFold: { active: false } } },
 				{},
 			);
-			assert.deepEqual(result, { ok: false, reason: "No messages after trim" });
+			assert.deepEqual(result, { ok: false, reasonKey: "engine.fold.reason.noMessagesAfterTrim" });
 		});
 
 		it("semanticFold returns ok=false when the fold head is below min savings", async () => {
@@ -665,7 +665,7 @@ describe("semanticFold integration", () => {
 				{ config: { foldTailPct: 0.03, aggressiveFoldTailPct: 0.03, minFoldSavings: 0.75, foldTimeoutMs: 5000, foldSummaryModel: "test", semanticFoldMarker: "<fold>" }, engine: { semanticFold: { active: false } } },
 				{},
 			);
-			assert.deepEqual(result, { ok: false, reason: "Head too small for meaningful savings" });
+			assert.deepEqual(result, { ok: false, reasonKey: "engine.fold.reason.headBelowMinimumSavings" });
 		});
 
 		it("semanticFold returns ok=false when summarizer returns empty", async () => {
@@ -683,7 +683,7 @@ describe("semanticFold integration", () => {
 				{ config: { foldThreshold: 0.75, aggressiveFoldThreshold: 0.78, exitSummaryThreshold: 0.80, preflightFoldThreshold: 0.90, foldTailPct: 0.1, aggressiveFoldTailPct: 0.05, minFoldSavings: 0, foldTimeoutMs: 5000, foldSummaryModel: "default", semanticFoldMarker: "<fold>" }, engine: { semanticFold: { active: false, foldedThisTurn: false } } },
 				{},
 			);
-			assert.deepEqual(result, { ok: false, reason: "Summarizer returned empty" });
+			assert.deepEqual(result, { ok: false, reasonKey: "engine.fold.reason.emptySummary" });
 		});
 
 		it("semanticFold propagates non-timeout summarizer errors", async () => {

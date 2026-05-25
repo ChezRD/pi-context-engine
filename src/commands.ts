@@ -137,7 +137,7 @@ async function pruneNow(pi: any, ctx: any, state: RuntimeState, indexer: ToolCal
 	notifyCommand(ctx, t(state.config, "tool.prune.started"), "info");
 	const result = await executePrune(pi, ctx, indexer, state, "auto");
 	if ((result.details?.summarized ?? 0) > 0) {
-		await rebuildPrunedContextFromSession(ctx, state, `${result.details.summarized} tool results pruned by /prune`);
+		await rebuildPrunedContextFromSession(ctx, state, `${result.details.summarized} tool results pruned by /prune`, "engine.prune.rebuild.reason.manual");
 	}
 	setStatus(ctx, state);
 	return { text: formatPruneCommandText(state, result), level: pruneResultLevel(result.details) };
@@ -159,7 +159,7 @@ function formatPruneCommandText(state: RuntimeState, result: { text: string; det
 			}),
 		].join("\n");
 	}
-	const reason = details.error ?? details.reason ?? "unknown";
+	const reason = details.errorKey ? t(state.config, details.errorKey) : (details.reason ?? t(state.config, "status.unknown"));
 	return [
 		result.text,
 		t(state.config, "tool.prune.diagnostics", {

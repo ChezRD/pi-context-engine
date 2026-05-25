@@ -267,7 +267,7 @@ describe("summarizeToolBatch", () => {
 		assert.equal(pool.results.length, 2);
 		assert.equal(pool.results[0]?.summaryText, "Combined summary of the tool batch");
 		assert.equal(pool.results[1]?.summaryText, "Combined summary of the tool batch");
-		assert.match(pool.metrics.error ?? "", /recovered via per-batch retry/);
+		assert.equal(pool.metrics.errorKey, "engine.prune.error.multiBatchRetry");
 	});
 
 	it("retries per-batch when multi-batch structured response is unusable", async () => {
@@ -291,7 +291,7 @@ describe("summarizeToolBatch", () => {
 		assert.equal(pool.results.length, 2);
 		assert.equal(pool.results[0]?.summaryText, "ok-2");
 		assert.equal(pool.results[1]?.summaryText, "ok-3");
-		assert.match(pool.metrics.error ?? "", /recovered via per-batch retry/);
+		assert.equal(pool.metrics.errorKey, "engine.prune.error.multiBatchRetry");
 		assert.equal(call, 3);
 	});
 

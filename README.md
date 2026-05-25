@@ -28,14 +28,16 @@ Core cache goal:
 stable prompt/tool prefix + bounded work history + controlled batch pruning + semantic folding
 ```
 
-## Semantic Fold Mechanism
-When context grows too large, `pi-context-engine` automatically performs a **semantic fold**. Instead of blindly dropping old messages, it uses an LLM to read the oldest part of the conversation and condense it into a compact, coherent summary. This summary is then injected into the context as a synthetic assistant message, and the original verbose messages are removed.
+## Semantic fold mechanism
 
-**Key Features of Semantic Fold:**
-- **Preserves explicit pin markers when present:** The fold engine preserves matching Reasonix-style `<skill-pin>` blocks, future context-engine pin blocks, and high-priority/memory markers if they are present in the conversation. These markers are context-engine/Reasonix compatibility heuristics, not a Pi platform contract.
-- **Cache friendly:** Semantic fold is designed to avoid unnecessary prefix churn so provider prompt caches can recover after the fold warmup request.
-- **UI Warnings:** When context gets within a few turns of the critical threshold, the status bar will show a warning (e.g., `~3 turns (auto-fold ⚠)`).
-- **Configurable Models:** The summarization model used for pruning and folding can be configured. If you set `pruneModel` or `foldSummaryModel` to `"auto"` or `"default"`, the engine will use your currently selected chat model for summarization.
+When context grows too large, `pi-context-engine` runs a semantic fold. It asks an LLM to summarize the oldest conversation span, inserts that summary as a synthetic assistant message, and removes the verbose source messages from future model context.
+
+Semantic fold behavior:
+
+- Preserves explicit pin markers when present. The fold engine keeps matching Reasonix-style `<skill-pin>` blocks, future context-engine pin blocks, and high-priority/memory markers found in the conversation. These markers are context-engine/Reasonix compatibility heuristics, not a Pi platform contract.
+- Keeps provider cache prefixes stable where possible. The fold path avoids changing stable prefix inputs, so provider prompt caches can recover after the fold warmup request.
+- Warns before overflow. When context gets within a few turns of the critical threshold, the status bar shows a warning, for example `~3 turns (auto-fold ⚠)`.
+- Uses configurable summarization models. If `pruneModel` or `foldSummaryModel` is `"auto"` or `"default"`, the engine uses the currently selected chat model for summarization.
 
 ## Cache prefix invariant
 
@@ -187,7 +189,7 @@ Compaction guardrails:
 
 `pi-context-engine` includes a built-in tool-result pruner adapted from `pi-context-prune` concepts.
 
-**How pruning affects cache:** When pruning runs, verbose tool results are summarized and future context receives summaries instead of repeated raw output. The original Pi session history remains host-owned; the engine tracks summarized tool call ids and injects pruned summaries through its context projection path.
+Cache effect: pruning summarizes verbose tool results, then future model context receives the summaries instead of repeated raw output. Pi still owns the original session history. The engine tracks summarized tool call ids and injects summaries through its context projection path.
 
 The built-in modes are:
 
@@ -204,21 +206,21 @@ Why `agent-message`:
 - batches a stretch of tool work
 - summarizes once when the agent sends a final text response
 - prunes raw `toolResult` messages from future context
-- causes one intentional cache miss per meaningful pruned batch, then returns to a shorter stable context
+- causes one intentional cache miss per pruned tool-output batch, then returns to a shorter stable context
 
 Pruner profile guidance:
 
 | Session type | Recommended pruner profile | Why |
 |---|---|---|
 | Short interactive session | `on-demand` or off | Avoid unnecessary context rewrites |
-| Normal long coding | `agent-message` | Best cache/cost tradeoff |
-| Tool-heavy research | `agent-message`, or `checkpoint` when you create meaningful checkpoints | Avoid repeated cache churn |
+| Normal long coding | `agent-message` | Recommended cache/cost tradeoff |
+| Tool-heavy research | `agent-message`, or `checkpoint` at task boundaries | Avoid repeated cache churn |
 | Autonomous multi-hour loop | `agentic-auto`, enabled before work starts | Lets model prune before overflow, with extra tool/prompt surface |
 | Debugging pruning behavior | `on-demand` | User controls exact prune points |
 
 Avoid `every-turn` for normal work. It keeps raw context smallest, but rewrites future prompt context too often and can reduce provider cache reuse.
 
-### `agentic-auto` implications
+### `agentic-auto` tradeoffs
 
 `agentic-auto` gives the model a pruning tool and prompt guidance so it can decide when to prune during autonomous work.
 
@@ -230,12 +232,12 @@ In this implementation:
 
 Implications:
 
-1. **Tool list changes.** `context_prune` becomes model-visible. Tool specs are cache-relevant prefix bytes for providers with prompt caching, so enabling this mid-session can cause a cache-miss turn.
-2. **System prompt changes.** Added pruning instructions also change prefix bytes. Enable before long work starts.
-3. **More autonomy.** Useful for multi-hour runs where final text-only assistant messages are rare.
-4. **Possible over-pruning.** Frequent `context_prune` calls rewrite context often and can reduce cache hit rate.
-5. **More tool surface.** One extra tool can affect tool selection and prompt size.
-6. **Recovery differs from external `pi-context-prune`.** This engine does not provide `context_tree_query`; huge single outputs use `context_result_lookup` instead.
+1. Tool list changes. `context_prune` becomes model-visible. Tool specs are cache-relevant prefix bytes for providers with prompt caching, so enabling this mid-session can cause a cache-miss turn.
+2. System prompt changes. Added pruning instructions also change prefix bytes. Enable before long work starts.
+3. Autonomous pruning. Useful for multi-hour runs where final text-only assistant messages are rare.
+4. Over-pruning risk. Frequent `context_prune` calls rewrite context often and can reduce cache hit rate.
+5. Larger tool surface. One extra tool can affect tool selection and prompt size.
+6. Different recovery path. This engine does not provide `context_tree_query`; huge single outputs use `context_result_lookup` instead.
 
 Recommendation:
 
@@ -282,7 +284,7 @@ Enable:
 /context-engine enable-capper
 ```
 
-When enabled, huge text tool results are replaced with a stable preview and a contextual ref like `dsc-read-1` or `dsc-bash-2`. The preview header shows the ref separately so it is easy to spot in the transcript. The full output is recoverable through:
+When enabled, huge text tool results are replaced with a stable preview and a contextual ref like `dsc-read-1` or `dsc-bash-2`. The preview header shows the ref separately for quick visual scanning in the transcript. The full output is recoverable through:
 
 ```text
 context_result_lookup [ref=dsc-read-1]
@@ -529,14 +531,14 @@ The extension tracks **cache checkpoints** and **cache segments** to provide acc
 
 A cache checkpoint marks a known boundary where provider cache continuity changes. Checkpoints are created automatically for:
 
-- **Model drift** — model id changes between provider requests
-- **System/tool drift** — system prompt or tool schemas change
-- **Model select** — user explicitly switches model
-- **Session compact** — host compaction rewrites history
-- **Semantic fold** — fold summary is injected into context
-- **Prune/compact** — summarized tool results or custom compaction rewrites prefix
-- **Conversation rewind** — `context_rewind` creates new branch
-- **Conversation checkpoint** — `context_checkpoint` creates named label
+- Model drift: model id changes between provider requests
+- System/tool drift: system prompt or tool schemas change
+- Model select: user explicitly switches model
+- Session compact: host compaction rewrites history
+- Semantic fold: fold summary is injected into context
+- Prune/compact: summarized tool results or custom compaction rewrites prefix
+- Conversation rewind: `context_rewind` creates new branch
+- Conversation checkpoint: `context_checkpoint` creates named label
 
 Manual conversation checkpoints (`context_checkpoint`) do not close the current cache segment by default (configurable via `checkpointStartsSegment: true`). Rewind always starts a new segment.
 

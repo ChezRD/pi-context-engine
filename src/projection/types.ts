@@ -56,7 +56,7 @@ export interface SummarizePoolMetrics {
 	rawChars?: number;
 	summaryChars?: number;
 	modelId?: string;
-	error?: string;
+	errorKey?: string;
 }
 
 export interface SummarizePoolResult {

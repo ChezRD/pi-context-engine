@@ -22,6 +22,7 @@ export interface FoldBoundary {
 	totalTokenCount: number;
 	tailStartIndex: number;
 	reason?: string;
+	reasonKey?: string;
 }
 
 export interface PinnedSkill {
@@ -49,6 +50,7 @@ export interface FoldResult {
 	tailMessages?: number;
 	ctxAfterPct?: number;
 	reason?: string;
+	reasonKey?: string;
 }
 
 export interface ModelCost {
@@ -136,7 +138,7 @@ export interface CacheStats {
 	sinceCompactionRequests: number;
 	last?: UsageSnapshot;
 	usages: UsageSnapshot[];
-	compacts: Array<{ turn: number; reason: "auto" | "manual" | "host"; completed: boolean; error?: string }>;
+	compacts: Array<{ turn: number; reason: "auto" | "manual" | "host"; completed: boolean; errorKey?: string }>;
 }
 
 export interface DeepSeekDetection {
@@ -268,7 +270,7 @@ export interface AppendOnlyProjectionState {
 	stableSummary?: any;
 	tailStartEntryId?: string;
 	tailFingerprint?: string;
-	invalidatedReason?: string;
+	invalidatedReasonKey?: string;
 }
 
 export interface PendingRewind {
@@ -350,8 +352,8 @@ export interface PruneState {
 		lastRebuildNewlyApplied?: number;
 		lastRebuildCheckpointOpened?: boolean;
 		lastRebuildSavedApproxChars?: number;
-		lastRebuildReason?: string;
-		lastError?: string;
+		lastRebuildReasonKey?: string;
+		lastErrorKey?: string;
 	};
 }
 

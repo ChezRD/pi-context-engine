@@ -161,14 +161,14 @@ export function renderStoredHugeResult(result: any, expanded: boolean, theme: an
 	const record = ref ? store.get(ref) : undefined;
 	const text = record?.text ?? extractModelVisibleSection(textContent, "preview") ?? "";
 	const lines = text.split(/\r?\n/);
-	const source = record?.toolName ?? metadata?.source_tool ?? "unknown";
+	const source = String(record?.toolName ?? metadata?.source_tool ?? "unknown");
 	const bytes = record ? `${record.bytes} bytes` : "preview";
-	const lookup = ref ? ` ${theme.fg("accent", `[ref ${ref}]`)} ${theme.fg("muted", `source ${source}`)}` : "";
-	const header = theme.fg("muted", `large output: ${bytes}`) + lookup;
+	const lookup = ref ? ` ${theme.fg("accent", `[ref ${ref}]`)} ${theme.fg("muted", t("capper.render.source", { source }))}` : "";
+	const header = theme.fg("muted", t("capper.render.largeOutput", { size: bytes })) + lookup;
 	if (!expanded) {
 		const visible = lines.slice(0, 12).join("\n");
-		const recovery = ref ? `\n${theme.fg("muted", `Full output: ${CONTEXT_RESULT_LOOKUP_TOOL} [ref=${ref}]`)}` : "";
-		const more = lines.length > 12 ? `\n${theme.fg("muted", `... ${lines.length - 12} more lines; Ctrl+O to expand`)}` : "";
+		const recovery = ref ? `\n${theme.fg("muted", t("capper.render.fullOutput", { tool: CONTEXT_RESULT_LOOKUP_TOOL, ref }))}` : "";
+		const more = lines.length > 12 ? `\n${theme.fg("muted", t("capper.render.moreLines", { count: lines.length - 12 }))}` : "";
 		return new Text(`${header}${recovery}\n${theme.fg("toolOutput", visible)}${more}`, 0, 0);
 	}
 	return new Text(`${header}\n${theme.fg("toolOutput", text)}`, 0, 0);
@@ -189,12 +189,12 @@ function lookupDisplay(details: { ref?: string; offset?: number; limit?: number;
 	const returned = details.returnedChars;
 	const end = returned === undefined ? undefined : offset + returned;
 	const total = details.totalChars;
-	const range = end === undefined ? `from ${offset}` : `${offset}-${end}`;
-	const totalText = total === undefined ? "" : ` / ${total} chars`;
-	const limitText = details.limit === undefined ? "" : ` · limit ${details.limit}`;
-	const sizeText = details.bytes === undefined ? "" : ` · ${details.bytes} bytes`;
-	const moreText = details.hasMore === undefined ? "" : details.hasMore ? " · more available" : " · end";
-	return `${ref} · chars ${range}${totalText}${limitText}${sizeText}${moreText}`;
+	const range = end === undefined ? t("capper.lookup.from", { offset }) : `${offset}-${end}`;
+	const totalText = total === undefined ? "" : ` ${t("capper.lookup.totalChars", { total })}`;
+	const limitText = details.limit === undefined ? "" : ` · ${t("capper.lookup.limit", { limit: details.limit })}`;
+	const sizeText = details.bytes === undefined ? "" : ` · ${t("capper.lookup.bytes", { bytes: details.bytes })}`;
+	const moreText = details.hasMore === undefined ? "" : details.hasMore ? ` · ${t("capper.lookup.moreAvailable")}` : ` · ${t("capper.lookup.end")}`;
+	return `${ref} · ${t("capper.lookup.chars", { range })}${totalText}${limitText}${sizeText}${moreText}`;
 }
 
 function firstLines(text: string, maxLines: number): string {
@@ -262,7 +262,7 @@ export function registerLookupTool(pi: any, store: HugeResultStore): void {
 				const payload = text.replace(header, "").trimStart();
 				const lines = payload.split(/\r?\n/);
 				const visible = lines.slice(0, 12).join("\n");
-				const more = lines.length > 12 ? `\n${theme.fg("muted", `... ${lines.length - 12} more lines; Ctrl+O to expand`)}` : "";
+				const more = lines.length > 12 ? `\n${theme.fg("muted", t("capper.render.moreLines", { count: lines.length - 12 }))}` : "";
 				return new Text(`${theme.fg("muted", display)}\n${theme.fg("toolOutput", visible)}${more}`, 0, 0);
 			}
 			return new Text(theme.fg("toolOutput", text.replace(header, "").trimStart()), 0, 0);

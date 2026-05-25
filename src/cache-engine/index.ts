@@ -8,6 +8,7 @@ import { handleSessionBeforeCompact as beforeCompact } from "./custom-compaction
 import { activateAppendOnlyProjectionFromCompact, applyAppendOnlyProjection } from "./append-only-projection.ts";
 import { handleAssistantMessageIntent, handleUserIntent, maybeInjectToolIntentNudge, handleToolCall as toolCall } from "./tool-stability.ts";
 import { rebuildPrunedContext } from "../projection/rebuild.ts";
+import { t } from "../i18n/index.ts";
 export { holdCompaction, requestCompact, requestFold } from "./auto-compact.ts";
 export { registerFoldTool } from "./fold-tool.ts";
 export { buildContextStatus, canCompactNow, decideCompaction, decisionLabel, estimateTurnStart } from "./decision-engine.ts";
@@ -25,7 +26,7 @@ export async function handleBeforeAgentStart(pi: any, event: any, ctx: any, stat
 	if (state.config.enabled && state.config.autoFold && state.engine.turnIndex > 0) {
 		const preflight = estimateTurnStart(ctx, state.config);
 		if (preflight.shouldFold) {
-			ctx?.ui?.notify?.("Context above 90% — pre-flight fold triggered.", "warning");
+			ctx?.ui?.notify?.(t("engine.notify.preflightFold"), "warning");
 			await requestFold(pi, ctx, state, { reason: "preflight" });
 		}
 	}

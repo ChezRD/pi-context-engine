@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { PrunerStatus } from "./types.ts";
+import { t } from "./i18n/index.ts";
 
 function namesFrom(items: any[]): string[] {
 	return items.map((item) => (typeof item === "string" ? item : item?.name)).filter((name): name is string => typeof name === "string");
@@ -25,13 +26,13 @@ function readPrunerConfig(): Partial<PrunerStatus> {
 }
 
 export function classifyPruner(config: Partial<PrunerStatus>): Pick<PrunerStatus, "cacheProfile" | "cacheProfileReason"> {
-	if (config.enabled === false) return { cacheProfile: "risky", cacheProfileReason: "pruner disabled; context can grow until compaction" };
-	if (config.pruneOn === "every-turn") return { cacheProfile: "bad", cacheProfileReason: "every-turn causes repeated prompt-cache churn" };
-	if (config.pruneOn === "agent-message" && config.batchingMode === "agent-message") return { cacheProfile: "good", cacheProfileReason: "agent-message batching preserves cache stability" };
-	if (config.pruneOn === "checkpoint") return { cacheProfile: "good", cacheProfileReason: "checkpoint pruning runs only at explicit conversation milestones" };
-	if (config.pruneOn === "on-demand") return { cacheProfile: "good", cacheProfileReason: "on-demand pruning keeps user in control of cache resets" };
-	if (config.pruneOn === "agentic-auto") return { cacheProfile: "risky", cacheProfileReason: "agentic-auto depends on model pruning frequency" };
-	return { cacheProfile: "risky", cacheProfileReason: "unknown or non-cache-optimal pruner profile" };
+	if (config.enabled === false) return { cacheProfile: "risky", cacheProfileReason: t("pruner.reason.disabled") };
+	if (config.pruneOn === "every-turn") return { cacheProfile: "bad", cacheProfileReason: t("pruner.reason.everyTurn") };
+	if (config.pruneOn === "agent-message" && config.batchingMode === "agent-message") return { cacheProfile: "good", cacheProfileReason: t("pruner.reason.agentMessage") };
+	if (config.pruneOn === "checkpoint") return { cacheProfile: "good", cacheProfileReason: t("pruner.reason.checkpoint") };
+	if (config.pruneOn === "on-demand") return { cacheProfile: "good", cacheProfileReason: t("pruner.reason.onDemand") };
+	if (config.pruneOn === "agentic-auto") return { cacheProfile: "risky", cacheProfileReason: t("pruner.reason.agenticAuto") };
+	return { cacheProfile: "risky", cacheProfileReason: t("pruner.reason.unknownProfile") };
 }
 
 export function detectPruner(pi: any): PrunerStatus {

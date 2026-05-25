@@ -4,6 +4,10 @@ import type { ContextEnginePin, FoldBoundary, PinnedSkill, FoldResult } from "..
 
 const SESSION_INTENT_MAX_CHARS = 900;
 
+function foldFailure(reasonKey: string): FoldResult {
+	return { ok: false, reasonKey };
+}
+
 /**
  * Rough token count: chars/4.
  * Handles string, ContentPart[], and tool_calls JSON.
@@ -47,7 +51,7 @@ export function estimateFoldBoundary(
 	tailBudget: number,
 ): FoldBoundary {
 	if (!Array.isArray(messages) || messages.length === 0) {
-		return { ok: false, headMessages: [], tailMessages: [], headTokenCount: 0, tailTokenCount: 0, totalTokenCount: 0, tailStartIndex: 0, reason: "No messages" };
+		return { ok: false, headMessages: [], tailMessages: [], headTokenCount: 0, tailTokenCount: 0, totalTokenCount: 0, tailStartIndex: 0, reasonKey: "engine.fold.reason.noMessages" };
 	}
 
 	// Count tokens per message (lazy, from end)
@@ -336,7 +340,7 @@ export async function semanticFold(
 	const ctxUsage = ctx?.getContextUsage?.();
 	const ctxMax = ctxUsage?.ctxMax ?? ctxUsage?.maxTokens ?? ctxUsage?.limit ?? 0;
 	if (!ctxMax || ctxMax <= 0) {
-		return { ok: false, reason: "No ctxMax available" };
+		return foldFailure("engine.fold.reason.noContextLimit");
 	}
 
 	const tailBudget = (aggressive ? config.aggressiveFoldTailPct : config.foldTailPct) * ctxMax;
@@ -349,11 +353,11 @@ export async function semanticFold(
 			entries = [...branch].reverse(); // root → leaf
 		}
 	} catch {
-		return { ok: false, reason: "Cannot access session branch" };
+		return foldFailure("engine.fold.reason.sessionBranchUnavailable");
 	}
 
 	if (entries.length === 0) {
-		return { ok: false, reason: "No session entries" };
+		return foldFailure("engine.fold.reason.noSessionEntries");
 	}
 
 	const messages = entries.map((e: any) => e.message).filter(Boolean);
@@ -363,19 +367,19 @@ export async function semanticFold(
 	const _removed = removed; // unused but documented
 
 	if (trimmedMessages.length === 0) {
-		return { ok: false, reason: "No messages after trim" };
+		return foldFailure("engine.fold.reason.noMessagesAfterTrim");
 	}
 
 	// 2. Estimate fold boundary
 	const boundary = estimateFoldBoundary(trimmedMessages, 0, tailBudget);
 	if (!boundary.ok || boundary.headMessages.length === 0) {
-		return { ok: false, reason: boundary.reason ?? "No head to fold" };
+		return foldFailure(boundary.reasonKey ?? "engine.fold.reason.noHeadToFold");
 	}
 
 	// Check min savings
 	const totalTokens = boundary.totalTokenCount || countMessageTokens(trimmedMessages[0]) * trimmedMessages.length;
 	if (totalTokens > 0 && boundary.headTokenCount < totalTokens * config.minFoldSavings) {
-		return { ok: false, reason: "Head too small for meaningful savings" };
+		return foldFailure("engine.fold.reason.headBelowMinimumSavings");
 	}
 
 	// 3. Extract pinned skills + constraints + engine pins from HEAD messages only
@@ -394,7 +398,7 @@ export async function semanticFold(
 	});
 
 	if (!summary || summary.trim().length === 0) {
-		return { ok: false, reason: "Summarizer returned empty" };
+		return foldFailure("engine.fold.reason.emptySummary");
 	}
 
 	// 5. Build synthetic message

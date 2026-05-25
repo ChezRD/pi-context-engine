@@ -504,15 +504,15 @@ test("executePrune falls back to observation mask when summary model returns no 
     assert.equal(result.details.summarized, 1);
     assert.equal(result.details.attempted, 1);
     assert.equal(result.details.summaryRequests, 1);
-    assert.equal(result.details.error, "summary response was empty");
+    assert.equal(result.details.errorKey, "engine.prune.error.summaryEmpty");
     assert.equal(completeOptions.reasoningEffort, undefined);
     assert.match(state.engine.prune.impact.lastSummarizePrompt, /Input JSON:/);
     assert.match(state.engine.prune.impact.lastSummarizePrompt, /"payload_kind": "tool_call_batches_v2"/);
     assert.equal(state.engine.prune.impact.lastSummarizeResponse, "");
-    assert.equal(state.engine.prune.impact.lastError, "summary response was empty");
+    assert.equal(state.engine.prune.impact.lastErrorKey, "engine.prune.error.summaryEmpty");
     assert.equal(state.toolIndexer.isSummarized("tc-1"), true);
     assert.match(state.toolIndexer.getRecord("tc-1").summaryText, /Tool output masked/);
-    assert.equal(entries.some((entry) => entry.customType === CUSTOM_TYPE_PRUNE_DEBUG && entry.data.error === "summary response was empty"), true);
+    assert.equal(entries.some((entry) => entry.customType === CUSTOM_TYPE_PRUNE_DEBUG && entry.data.errorKey === "engine.prune.error.summaryEmpty"), true);
     assert.equal(entries.some((entry) => entry.customType === CUSTOM_TYPE_TELEMETRY), true);
     assert.match(result.text, /1/);
   } finally {
@@ -548,7 +548,7 @@ test("executePrune marks tool calls with missing replayable results and persists
   assert.equal(result.details.missingResults, 1);
   assert.equal(result.details.summaryRequests, 0);
   assert.equal(state.engine.prune.skippedMissingResultIds.includes("tc-missing"), true);
-  assert.equal(state.engine.prune.impact.lastError, "missing_tool_results");
+  assert.equal(state.engine.prune.impact.lastErrorKey, "engine.prune.error.missingToolResults");
 });
 
 test("executePrune interactive mode lists replayable tool calls without summarizing", async () => {
@@ -659,10 +659,10 @@ test("executePrune uses explicit summarizer override and skips inefficient repla
 
 test("executePrune masks empty or malformed summarizer responses for large tool results", async () => {
   const variants = [
-    { name: "null", response: null, error: "summary model returned no response", requests: 1 },
-    { name: "undefined", response: undefined, error: "summary model returned no response", requests: 1 },
-    { name: "empty content array", response: { content: [] }, error: "summary response was empty", requests: 1 },
-    { name: "invalid JSON", response: { content: [{ type: "text", text: "{\"summaries\":[" }] }, error: "summary response did not contain usable structured summaries", requests: 1 },
+    { name: "null", response: null, errorKey: "engine.prune.error.modelNoResponse", requests: 1 },
+    { name: "undefined", response: undefined, errorKey: "engine.prune.error.modelNoResponse", requests: 1 },
+    { name: "empty content array", response: { content: [] }, errorKey: "engine.prune.error.summaryEmpty", requests: 1 },
+    { name: "invalid JSON", response: { content: [{ type: "text", text: "{\"summaries\":[" }] }, errorKey: "engine.prune.error.structuredSummaryMissing", requests: 1 },
   ];
 
   for (const variant of variants) {
@@ -685,7 +685,7 @@ test("executePrune masks empty or malformed summarizer responses for large tool 
     assert.equal(result.details.reason, "summarized", variant.name);
     assert.equal(result.details.summarized, 1, variant.name);
     assert.equal(result.details.summaryRequests, variant.requests, variant.name);
-    assert.equal(result.details.error, variant.error, variant.name);
+    assert.equal(result.details.errorKey, variant.errorKey, variant.name);
     assert.equal(state.toolIndexer.isSummarized(`tc-${variant.name}`), true, variant.name);
     assert.match(state.toolIndexer.getRecord(`tc-${variant.name}`).summaryText, /Tool output masked/, variant.name);
   }
@@ -951,7 +951,7 @@ test("telemetry restore hydrates latest prune debug trace when telemetry lacks i
         response: "debug response",
         acceptedSummaries: ["accepted"],
         maxTokens: 512,
-        error: "debug error",
+        errorKey: "engine.prune.error.summaryRequestFailed",
       },
     },
   ];
@@ -960,7 +960,7 @@ test("telemetry restore hydrates latest prune debug trace when telemetry lacks i
   assert.equal(restored.engine.prune.impact.lastSummarizeResponse, "debug response");
   assert.deepEqual(restored.engine.prune.impact.lastAcceptedSummaries, ["accepted"]);
   assert.equal(restored.engine.prune.impact.lastSummarizeMaxTokens, 512);
-  assert.equal(restored.engine.prune.impact.lastError, "debug error");
+  assert.equal(restored.engine.prune.impact.lastErrorKey, "engine.prune.error.summaryRequestFailed");
 });
 
 test("telemetry restore clears legacy pendingSummaries state", () => {

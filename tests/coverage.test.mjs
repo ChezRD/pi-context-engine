@@ -144,7 +144,7 @@ describe("estimateFoldBoundary", () => {
 	it("returns ok:false for empty messages", () => {
 		const r = m.estimateFoldBoundary([], 0, 100);
 		assert.equal(r.ok, false);
-		assert.equal(r.reason, "No messages");
+		assert.equal(r.reasonKey, "engine.fold.reason.noMessages");
 	});
 	it("splits messages into head and tail", () => {
 		const msgs = [
@@ -1112,7 +1112,7 @@ describe("compact tool renderers", () => {
 
 describe("activateAppendOnlyProjectionFromCompact", () => {
 	it("sets projection active with summary", () => {
-		const st = { config: { appendOnlyProjection: true }, engine: { appendOnly: { enabled: false, projectionActive: false, stableSummary: null, tailStartEntryId: "", tailFingerprint: undefined, invalidatedReason: undefined } } };
+		const st = { config: { appendOnlyProjection: true }, engine: { appendOnly: { enabled: false, projectionActive: false, stableSummary: null, tailStartEntryId: "", tailFingerprint: undefined, invalidatedReasonKey: undefined } } };
 		m.activateAppendOnlyProjectionFromCompact({ summary: "fold summary", firstKeptEntryId: "entry-5" }, st);
 		assert.ok(st.engine.appendOnly.projectionActive);
 		assert.equal(st.engine.appendOnly.tailStartEntryId, "entry-5");
@@ -1127,7 +1127,7 @@ describe("activateAppendOnlyProjectionFromCompact", () => {
 					stableSummary: { role: "assistant", content: "old" },
 					tailStartEntryId: "old-tail",
 					tailFingerprint: "old-hash",
-					invalidatedReason: "tail changed non-append-only",
+					invalidatedReasonKey: "engine.appendOnly.invalidated.tailChanged",
 				},
 			},
 		};
@@ -1136,7 +1136,7 @@ describe("activateAppendOnlyProjectionFromCompact", () => {
 		assert.equal(st.engine.appendOnly.stableSummary.content, "new summary");
 		assert.equal(st.engine.appendOnly.tailStartEntryId, "new-tail");
 		assert.equal(st.engine.appendOnly.tailFingerprint, undefined);
-		assert.equal(st.engine.appendOnly.invalidatedReason, undefined);
+		assert.equal(st.engine.appendOnly.invalidatedReasonKey, undefined);
 	});
 	it("skips activation when summary or tail start id is missing", () => {
 		const st = { config: { appendOnlyProjection: true }, engine: { appendOnly: { projectionActive: false } } };
@@ -1650,7 +1650,7 @@ describe("auto-compact", () => {
 		state.engine.turnIndex = 1;
 		const result = await m.requestFold({ complete: async () => "unused" }, { getContextUsage: () => ({ ctxMax: 0 }) }, state);
 		assert.equal(result.ok, false);
-		assert.match(result.error, /compact/i);
+		assert.match(result.error, /context limit/i);
 		assert.equal(state.engine.compactCount, 0);
 	});
 
@@ -1774,7 +1774,7 @@ describe("auto-compact", () => {
 		assert.equal(state.engine.compactCount, 1);
 		assert.equal(state.engine.lastCompactTurn, 4);
 		assert.equal(state.stats.compacts.at(-1).completed, false);
-		assert.equal(state.stats.compacts.at(-1).error, "manual compact failed");
+		assert.equal(state.stats.compacts.at(-1).errorKey, "engine.compactFailed");
 		assert.ok(notices.some((notice) => notice.level === "error" && /manual compact failed/.test(notice.text)));
 	});
 
@@ -1884,7 +1884,7 @@ describe("auto-compact", () => {
 
 		await m.autoHandleTurnEnd({}, ctx, state, {});
 
-		assert.equal(state.engine.prune.impact.lastError, "branch unavailable");
+		assert.equal(state.engine.prune.impact.lastErrorKey, "engine.prune.error.unexpected");
 		assert.ok(notices.some((notice) => notice.level === "warning" && /branch unavailable/.test(notice.text)));
 		assert.equal(state.engine.lastZone, "green");
 	});
@@ -2626,7 +2626,7 @@ describe("projection/rebuild", () => {
 			{ role: "assistant", content: "after prune" },
 		];
 
-		const rebuild = m.rebuildPrunedContext(source, state, "manual prune");
+		const rebuild = m.rebuildPrunedContext(source, state, "manual prune", "engine.prune.rebuild.reason.manual");
 
 		assert.equal(rebuild.changed, true);
 		assert.deepEqual(rebuild.prunableIds, ["tc-1"]);
@@ -2644,7 +2644,7 @@ describe("projection/rebuild", () => {
 		assert.equal(state.engine.prune.impact.lastRebuildPrunableIds, 1);
 		assert.equal(state.engine.prune.impact.lastRebuildNewlyApplied, 1);
 		assert.equal(state.engine.prune.impact.lastRebuildCheckpointOpened, true);
-		assert.equal(state.engine.prune.impact.lastRebuildReason, "manual prune");
+		assert.equal(state.engine.prune.impact.lastRebuildReasonKey, "engine.prune.rebuild.reason.manual");
 	});
 
 	it("rebuildPrunedContext is idempotent once summarized ids were already applied", () => {
@@ -2870,7 +2870,7 @@ describe("applyAppendOnlyProjection edge cases", () => {
 					enabled: true, projectionActive: true,
 					tailStartEntryId: "e2",
 					tailFingerprint: undefined,
-					invalidatedReason: undefined,
+					invalidatedReasonKey: undefined,
 					stableSummary: { role: "assistant", content: "summary", name: "context_cache_stable_summary" },
 				},
 			},
@@ -2965,8 +2965,8 @@ describe("status output", () => {
 		state.engine.prune.impact.lastRebuildNewlyApplied = 1;
 		state.engine.prune.impact.lastRebuildSavedApproxChars = 1800;
 		state.engine.prune.impact.lastRebuildCheckpointOpened = true;
-		state.engine.prune.impact.lastRebuildReason = "auto test";
-		state.engine.prune.impact.lastError = "previous summary failed";
+		state.engine.prune.impact.lastRebuildReasonKey = "engine.prune.rebuild.reason.auto";
+		state.engine.prune.impact.lastErrorKey = "engine.prune.error.summaryRequestFailed";
 		return state;
 	}
 
@@ -2983,14 +2983,14 @@ describe("status output", () => {
 		assert.match(status, /progress 1\/2/);
 		assert.match(status, /Prune summary cost: 2 requests/);
 		assert.match(status, /Rebuild: 5 -> 3 messages/);
-		assert.match(status, /previous summary failed/);
+		assert.match(status, /summary request failed/);
 		assert.match(status, /abcdef123456/);
 		assert.match(status, /99%/);
 	});
 
 	it("buildDetailedStatus includes config, cache details, checkpoint history, and compaction history", () => {
 		const state = statusState();
-		state.stats.compacts.push({ turn: 3, reason: "manual", completed: false, error: "boom" });
+		state.stats.compacts.push({ turn: 3, reason: "manual", completed: false, errorKey: "engine.compactFailed" });
 		const details = m.buildDetailedStatus({ getCommands: () => [] }, state);
 
 		assert.match(details, /Context cache details/);
@@ -3000,7 +3000,7 @@ describe("status output", () => {
 		assert.match(details, /manual@3:failed/);
 		assert.match(details, /Checkpoints/);
 		assert.match(details, /Prune summary cost: 2 requests/);
-		assert.match(details, /auto test/);
+		assert.match(details, /automatic prune/);
 	});
 
 	it("formatPruneSummarizerTrace reports uncaptured and captured diagnostics", () => {
@@ -3173,7 +3173,7 @@ describe("summarizeToolBatch edge cases", () => {
     assert.match(empty.results[0].summaryText, /summary response was empty/);
     assert.match(empty.results[0].summaryText, /Coverage: unknown/);
     assert.equal(empty.metrics.requests, 1);
-    assert.equal(empty.metrics.error, "summary response was empty");
+    assert.equal(empty.metrics.errorKey, "engine.prune.error.summaryEmpty");
     assert.equal(empty.metrics.cacheReadTokens, 3);
 
     const missing = await m.summarizeToolBatchPool(
@@ -3183,7 +3183,7 @@ describe("summarizeToolBatch edge cases", () => {
     );
     assert.match(missing.results[0].summaryText, /summary model returned no response/);
     assert.equal(missing.metrics.requests, 1);
-    assert.equal(missing.metrics.error, "summary model returned no response");
+    assert.equal(missing.metrics.errorKey, "engine.prune.error.modelNoResponse");
   });
 
   it("summarizeToolBatchPool handles abort and timeout errors as non-throwing failures", async () => {
@@ -3195,7 +3195,7 @@ describe("summarizeToolBatch edge cases", () => {
       );
       assert.match(pool.results[0].summaryText, new RegExp(name));
       assert.equal(pool.metrics.requests, 0);
-      assert.equal(pool.metrics.error, name);
+      assert.equal(pool.metrics.errorKey, "engine.prune.error.summaryRequestFailed");
     }
   });
 
@@ -3217,7 +3217,7 @@ describe("summarizeToolBatch edge cases", () => {
       { enabled: true, pruneOn: "every-turn", summarizerModel: "default" },
     );
     assert.match(pool.results[0].summaryText, /Tool output masked/);
-    assert.equal(pool.metrics.error, "summary response did not contain usable structured summaries");
+    assert.equal(pool.metrics.errorKey, "engine.prune.error.structuredSummaryMissing");
   });
 
   it("summarizeToolBatches preserves empty and single-batch wrapper behavior", async () => {

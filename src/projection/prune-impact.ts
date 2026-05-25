@@ -40,7 +40,7 @@ function impactState(state: RuntimeState): RuntimeState["engine"]["prune"]["impa
 
 export function recordPruneSummarizeImpact(state: RuntimeState, metrics: SummarizePoolMetrics): void {
 	const impact = impactState(state);
-	if (metrics.error) impact.lastError = metrics.error;
+	if (metrics.errorKey) impact.lastErrorKey = metrics.errorKey;
 	impact.summarizeRequests += metrics.requests;
 	impact.summarizeInputTokens += metrics.inputTokens;
 	impact.summarizeOutputTokens += metrics.outputTokens;
@@ -75,7 +75,9 @@ export function recordPruneSummarizeImpact(state: RuntimeState, metrics: Summari
 		impact.lastAcceptedSummaries = undefined;
 		impact.lastSummarizeMaxTokens = undefined;
 	}
-	if (metrics.requests > 0 && !metrics.error) delete impact.lastError;
+	if (metrics.requests > 0 && !metrics.errorKey) {
+		delete impact.lastErrorKey;
+	}
 }
 
 export function markAwaitingPruneImpact(state: RuntimeState, appliedIds: string[]): void {

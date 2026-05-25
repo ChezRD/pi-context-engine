@@ -257,7 +257,7 @@ export function currentSegmentStats(state: RuntimeState): CacheStats {
 	}), emptyStats());
 }
 
-export function markCompaction(stats: CacheStats, record?: { turn: number; reason: "auto" | "manual" | "host"; completed: boolean; error?: string }): CacheStats {
+export function markCompaction(stats: CacheStats, record?: { turn: number; reason: "auto" | "manual" | "host"; completed: boolean; errorKey?: string }): CacheStats {
 	return { ...stats, sinceCompactionRequests: 0, compacts: record ? [...(stats.compacts ?? []), record] : stats.compacts ?? [] };
 }
 

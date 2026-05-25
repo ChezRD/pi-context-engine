@@ -384,8 +384,8 @@ function buildPruneLines(state: RuntimeState, theme: any): string[] {
 		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneMissImpact", { requests: impact.postPruneRequests, miss: formatTokenCount(impact.lastPostPruneMissTokens ?? 0), cache: formatTokenCount(impact.postPruneCacheReadTokens), cost: lastMissCost, last: lastMissCost, hit: lastHit })}`));
 		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneRegret", { lookup: impact.postPruneLookupRegret ?? 0, read: impact.postPruneReadRegret ?? 0, foldRead: impact.postFoldReadRegret ?? 0 })}`));
 		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.prunePreservedDuringFlush", { batches: impact.pendingBatchesPreservedDuringFlush ?? 0, tools: impact.pendingToolCallsPreservedDuringFlush ?? 0, lastBatches: impact.lastPendingBatchesPreservedDuringFlush ?? 0, lastTools: impact.lastPendingToolCallsPreservedDuringFlush ?? 0 })}`));
-		if (impact.lastError) {
-			lines.push(theme.fg("warning", `  ${t(cfg, "ui.dashboard.pruneError", { error: impact.lastError })}`));
+		if (impact.lastErrorKey) {
+			lines.push(theme.fg("warning", `  ${t(cfg, "ui.dashboard.pruneError", { error: t(cfg, impact.lastErrorKey) })}`));
 		}
 	}
 	return lines;

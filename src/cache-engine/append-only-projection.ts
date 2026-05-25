@@ -28,7 +28,7 @@ export function activateAppendOnlyProjectionFromCompact(result: any, state: Runt
 	state.engine.appendOnly.stableSummary = { role: "assistant", content: summary, name: "context_cache_stable_summary" };
 	state.engine.appendOnly.tailStartEntryId = firstKeptEntryId;
 	state.engine.appendOnly.tailFingerprint = undefined;
-	state.engine.appendOnly.invalidatedReason = undefined;
+	state.engine.appendOnly.invalidatedReasonKey = undefined;
 }
 
 export function applyAppendOnlyProjection(event: any, ctx: any, state: RuntimeState): any | undefined {
@@ -42,7 +42,7 @@ export function applyAppendOnlyProjection(event: any, ctx: any, state: RuntimeSt
 	const nextHash = stableHash(tail);
 	if (!isAppendOnly(st.tailFingerprint, previousTail, tail)) {
 		st.projectionActive = false;
-		st.invalidatedReason = "tail changed non-append-only";
+		st.invalidatedReasonKey = "engine.appendOnly.invalidated.tailChanged";
 		ctx?.ui?.notify?.(t("engine.appendOnly.invalidated"), "warning");
 		return undefined;
 	}

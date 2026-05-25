@@ -30,14 +30,15 @@ export async function requestFold(pi: any, ctx: any, state: RuntimeState, opts?:
 		state.engine.compactCount++;
 		return { ok: true };
 	}
+	const semanticError = semResult.reasonKey ? t(semResult.reasonKey) : semResult.reason;
 
 	// Fallback to native ctx.compact()
-	if (typeof ctx?.compact !== "function") return { ok: false, error: t("engine.compactUnavailable") };
+	if (typeof ctx?.compact !== "function") return { ok: false, error: semanticError ?? t("engine.compactUnavailable") };
 
 	// Wrap compact in a Promise with timeout so it doesn't hang if onComplete isn't called
 	const compactResult = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
 		const timer = setTimeout(() => {
-			resolve({ ok: false, error: "compact timeout" });
+			resolve({ ok: false, error: t("engine.compactTimeout") });
 		}, 500);
 		try {
 			const raw = ctx.compact({
@@ -51,7 +52,7 @@ export async function requestFold(pi: any, ctx: any, state: RuntimeState, opts?:
 				},
 				onError: (error: Error) => {
 					clearTimeout(timer);
-					state.stats = markCompaction(state.stats, { turn: state.engine.turnIndex, reason: "auto", completed: false, error: error.message });
+					state.stats = markCompaction(state.stats, { turn: state.engine.turnIndex, reason: "auto", completed: false, errorKey: "engine.compactFailed" });
 					resolve({ ok: false, error: error.message });
 				},
 			});
@@ -71,7 +72,7 @@ export async function requestFold(pi: any, ctx: any, state: RuntimeState, opts?:
 	state.engine.lastCompactTurn = state.engine.turnIndex;
 	state.engine.compactCount++;
 	if (!compactResult.ok) {
-		return { ok: false, error: compactResult.error ?? "unknown" };
+		return { ok: false, error: compactResult.error ?? t("status.unknown") };
 	}
 	return { ok: true };
 }
@@ -86,7 +87,7 @@ export function requestCompact(ctx: any, state: RuntimeState): { ok: true } | { 
 				notify(ctx, t("engine.compactComplete"), "info");
 			},
 			onError: (error: Error) => {
-				state.stats = markCompaction(state.stats, { turn: state.engine.turnIndex, reason: "manual", completed: false, error: error.message });
+				state.stats = markCompaction(state.stats, { turn: state.engine.turnIndex, reason: "manual", completed: false, errorKey: "engine.compactFailed" });
 				notify(ctx, t("engine.compactFailed", { error: error.message }), "error");
 			},
 		});
@@ -183,7 +184,7 @@ async function runAutoPrune(pi: any, ctx: any, state: RuntimeState, event?: any)
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			state.engine.prune.impact.lastError = message;
+			state.engine.prune.impact.lastErrorKey = "engine.prune.error.unexpected";
 			notify(ctx, t("engine.prune.failed", { error: message }), "warning");
 			persistTelemetry(pi, state);
 		}
@@ -231,7 +232,7 @@ async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promis
 		}
 		if (pool.metrics.requests > 0) persistTelemetry(pi, state);
 		if (pool.metrics.requests === 0) {
-			notify(ctx, t("engine.prune.failed", { error: pool.metrics.error ?? "summary request did not run" }), "warning");
+			notify(ctx, t("engine.prune.failed", { error: t(pool.metrics.errorKey ?? "engine.prune.error.summaryRequestNotRun") }), "warning");
 			persistTelemetry(pi, state);
 			return;
 		}
@@ -295,7 +296,7 @@ async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promis
 				prompt: pool.debug?.prompt,
 				response: pool.debug?.responseText,
 				acceptedSummaries: pool.debug?.acceptedSummaries,
-				error: pool.metrics.error,
+				errorKey: pool.metrics.errorKey,
 			});
 		}
 		if (summarized > 0 || skippedOversized > 0) {
@@ -321,16 +322,16 @@ async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promis
 				state.engine.prune.awaitingAgentMessage = true;
 			}
 			if (summarized > 0) {
-				await rebuildPrunedContextFromSession(ctx, state, `${summarized} tool results pruned automatically`);
+				await rebuildPrunedContextFromSession(ctx, state, `${summarized} tool results pruned automatically`, "engine.prune.rebuild.reason.auto");
 				notify(ctx, t("engine.prune.triggered", { count: summarized }), "info");
 			}
-			if (skippedOversized > 0) notify(ctx, t("engine.prune.failed", { error: `skipped ${skippedOversized} oversized tool calls` }), "warning");
+			if (skippedOversized > 0) notify(ctx, t("engine.prune.failed", { error: t("engine.prune.error.skippedOversized", { count: skippedOversized }) }), "warning");
 			persistTelemetry(pi, state);
 		} else {
 			const target = Math.max(1, state.config.pruneBatchSize);
 			state.engine.prune.batchStepCounter = Math.max(0, target - 1);
 			state.engine.prune.awaitingAgentMessage = false;
-			notify(ctx, t("engine.prune.failed", { error: "summary response did not contain usable summaries" }), "warning");
+			notify(ctx, t("engine.prune.failed", { error: t("engine.prune.error.noUsableSummaries") }), "warning");
 			persistTelemetry(pi, state);
 		}
 	} finally {

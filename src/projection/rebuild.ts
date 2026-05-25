@@ -57,7 +57,7 @@ export function collectPrunableToolResultIds(messages: any[], state: RuntimeStat
 	return ids;
 }
 
-export function rebuildPrunedContext(messages: any[], state: RuntimeState, note?: string): PruneRebuildResult {
+export function rebuildPrunedContext(messages: any[], state: RuntimeState, note?: string, reasonKey?: string): PruneRebuildResult {
 	const source = Array.isArray(messages) ? messages : [];
 	const prunableIds = collectPrunableToolResultIds(source, state);
 	const sourceChars = estimateMessagesChars(source);
@@ -82,7 +82,7 @@ export function rebuildPrunedContext(messages: any[], state: RuntimeState, note?
 		newlyApplied: newlyApplied.length,
 		checkpointOpened,
 		savedApproxChars: Math.max(0, sourceChars - outputChars),
-		reason: note,
+		reasonKey,
 	});
 
 	return {
@@ -97,12 +97,12 @@ export function rebuildPrunedContext(messages: any[], state: RuntimeState, note?
 	};
 }
 
-export async function rebuildPrunedContextFromSession(ctx: any, state: RuntimeState, note?: string): Promise<PruneRebuildResult> {
+export async function rebuildPrunedContextFromSession(ctx: any, state: RuntimeState, note?: string, reasonKey?: string): Promise<PruneRebuildResult> {
 	const branch = await ctx?.sessionManager?.getBranch?.();
-	return rebuildPrunedContext(messagesFromBranch(branch), state, note);
+	return rebuildPrunedContext(messagesFromBranch(branch), state, note, reasonKey);
 }
 
-function recordRebuildMetrics(state: RuntimeState, metrics: { sourceMessages: number; outputMessages: number; prunableIds: number; newlyApplied: number; checkpointOpened: boolean; savedApproxChars: number; reason?: string }): void {
+function recordRebuildMetrics(state: RuntimeState, metrics: { sourceMessages: number; outputMessages: number; prunableIds: number; newlyApplied: number; checkpointOpened: boolean; savedApproxChars: number; reasonKey?: string }): void {
 	const impact = state.engine.prune.impact;
 	impact.lastRebuildSourceMessages = metrics.sourceMessages;
 	impact.lastRebuildOutputMessages = metrics.outputMessages;
@@ -110,7 +110,7 @@ function recordRebuildMetrics(state: RuntimeState, metrics: { sourceMessages: nu
 	impact.lastRebuildNewlyApplied = metrics.newlyApplied;
 	impact.lastRebuildCheckpointOpened = metrics.checkpointOpened;
 	impact.lastRebuildSavedApproxChars = metrics.savedApproxChars;
-	impact.lastRebuildReason = metrics.reason;
+	impact.lastRebuildReasonKey = metrics.reasonKey;
 }
 
 function estimateMessagesChars(messages: any[]): number {

@@ -640,10 +640,10 @@ function responseContentText(response: any): string {
 async function completeWithPiAi(modelId: string | undefined, userMessage: string, opts?: { signal?: AbortSignal; ctx?: any; maxTokens?: number; reasoningEffort?: string }): Promise<any> {
 	const ctx = opts?.ctx;
 	const model = await resolvePiAiModel(modelId, ctx);
-	if (!model) return { error: `summary model not found: ${modelId ?? "current"}` };
+	if (!model) return { error: `summary model not found: ${modelId ?? "current"}`, errorKey: "engine.prune.error.summaryModelUnavailable" };
 	const auth = await ctx?.modelRegistry?.getApiKeyAndHeaders?.(model);
-	if (!auth?.ok) return { error: auth?.error ?? `no auth for summary model ${model.id ?? modelId ?? "current"}` };
-	if (!auth.apiKey) return { error: `no API key for summary model ${model.provider ?? ""}/${model.id ?? modelId ?? "current"}` };
+	if (!auth?.ok) return { error: auth?.error ?? `no auth for summary model ${model.id ?? modelId ?? "current"}`, errorKey: "engine.prune.error.summaryAuth" };
+	if (!auth.apiKey) return { error: `no API key for summary model ${model.provider ?? ""}/${model.id ?? modelId ?? "current"}`, errorKey: "engine.prune.error.summaryAuth" };
 	const spec = "@earendil-works/pi-ai";
 	const { complete } = await import(spec);
 	const response = await complete(
@@ -805,24 +805,29 @@ export async function summarizeToolBatchPool(
 			response = await pi.complete(model, [{ role: "user", content: userMessage }], { maxTokens, signal: combinedSignal, reasoningEffort: undefined });
 		} else {
 			const completed = await completeWithPiAi(model, userMessage, { ctx: opts?.ctx, signal: combinedSignal, maxTokens, reasoningEffort: "off" });
-			if (completed.error) return { results: observationMaskResults(batches, completed.error), metrics: { ...emptyMetrics, error: completed.error, summaryChars: observationMaskResults(batches, completed.error).reduce((sum, item) => sum + item.summaryText.length, 0) }, debug: emptyDebug(userMessage, maxTokens) };
+			if (completed.error) {
+				const masked = observationMaskResults(batches, completed.error);
+				return { results: masked, metrics: { ...emptyMetrics, errorKey: completed.errorKey ?? "engine.prune.error.summaryModelUnavailable", summaryChars: masked.reduce((sum, item) => sum + item.summaryText.length, 0) }, debug: emptyDebug(userMessage, maxTokens) };
+			}
 			response = completed.response;
 			resolvedModelId = completed.modelId ?? model;
 		}
 
 		if (!response) {
-			const masked = observationMaskResults(batches, "summary model returned no response");
-			return { results: masked, metrics: { ...emptyMetrics, requests: 1, inputTokens: estimateTokens(userMessage), summaryChars: masked.reduce((sum, item) => sum + item.summaryText.length, 0), error: "summary model returned no response" }, debug: maskDebug(userMessage, maxTokens, masked) };
+			const error = "summary model returned no response";
+			const masked = observationMaskResults(batches, error);
+			return { results: masked, metrics: { ...emptyMetrics, requests: 1, inputTokens: estimateTokens(userMessage), summaryChars: masked.reduce((sum, item) => sum + item.summaryText.length, 0), errorKey: "engine.prune.error.modelNoResponse" }, debug: maskDebug(userMessage, maxTokens, masked) };
 		}
 		const text = responseContentText(response);
 		if (!text || text.trim().length === 0) {
 			const usage = readUsage(response, userMessage, text ?? "");
 			const pricing = deepSeekOfficialCost(model);
 			const cost = actualCostUsd({ input: usage.input, cacheRead: usage.cacheRead ?? 0, cacheWrite: 0, output: 0, cost: response?.usage?.cost?.total ?? response?.usage?.cost }, pricing);
-			const masked = observationMaskResults(batches, "summary response was empty");
+			const error = "summary response was empty";
+			const masked = observationMaskResults(batches, error);
 			return {
 				results: masked,
-				metrics: { ...emptyMetrics, requests: 1, inputTokens: usage.input, outputTokens: 0, cacheReadTokens: usage.cacheRead ?? 0, cost, modelId: resolvedModelId, summaryChars: masked.reduce((sum, item) => sum + item.summaryText.length, 0), error: "summary response was empty" },
+				metrics: { ...emptyMetrics, requests: 1, inputTokens: usage.input, outputTokens: 0, cacheReadTokens: usage.cacheRead ?? 0, cost, modelId: resolvedModelId, summaryChars: masked.reduce((sum, item) => sum + item.summaryText.length, 0), errorKey: "engine.prune.error.summaryEmpty" },
 				debug: maskDebug(userMessage, maxTokens, masked, text ?? ""),
 			};
 		}
@@ -856,9 +861,9 @@ export async function summarizeToolBatchPool(
 					rawChars,
 					summaryChars: retried.reduce((sum, item) => sum + (item.metrics.summaryChars ?? 0), 0),
 					modelId: resolvedModelId,
-					error: retried.some((item) => item.results.some(Boolean))
-						? "multi-batch structured summary failed; recovered via per-batch retry"
-						: "summary response did not contain usable structured summaries",
+					errorKey: retried.some((item) => item.results.some(Boolean))
+						? "engine.prune.error.multiBatchRetry"
+						: "engine.prune.error.structuredSummaryMissing",
 				},
 				debug: {
 					prompt: [userMessage, ...retried.map((item, index) => `--- retry ${index} ---\n${item.debug?.prompt ?? ""}`)].join("\n\n"),
@@ -904,7 +909,7 @@ export async function summarizeToolBatchPool(
 						rawChars,
 						summaryChars: failSoftResults.reduce((sum, item) => sum + (item?.summaryText?.length ?? 0), 0),
 						modelId: resolvedModelId,
-						error: "semantic quality retry applied",
+						errorKey: "engine.prune.error.qualityRetryApplied",
 					},
 					debug: {
 						prompt: [userMessage, ...retried.map((item, index) => `--- quality retry ${invalidIndexes[index]} ---\n${item.debug?.prompt ?? ""}`)].join("\n\n"),
@@ -929,7 +934,7 @@ export async function summarizeToolBatchPool(
 				rawChars,
 				summaryChars: failSoftResults.reduce((sum, item) => sum + (item?.summaryText?.length ?? 0), 0),
 				modelId: resolvedModelId,
-				error: hasUsableSummaries ? undefined : "summary response did not contain usable structured summaries",
+				errorKey: hasUsableSummaries ? undefined : "engine.prune.error.structuredSummaryMissing",
 			},
 			debug: {
 				prompt: userMessage,
@@ -941,7 +946,7 @@ export async function summarizeToolBatchPool(
 	} catch (err: any) {
 		const message = err?.name === "AbortError" || err?.name === "TimeoutError" ? err.name : (err?.message ?? String(err));
 		const masked = observationMaskResults(batches, message);
-		return { results: masked, metrics: { ...emptyMetrics, summaryChars: masked.reduce((sum, item) => sum + item.summaryText.length, 0), error: message }, debug: maskDebug(userMessage, maxTokens, masked) };
+		return { results: masked, metrics: { ...emptyMetrics, summaryChars: masked.reduce((sum, item) => sum + item.summaryText.length, 0), errorKey: "engine.prune.error.summaryRequestFailed" }, debug: maskDebug(userMessage, maxTokens, masked) };
 	}
 }
 

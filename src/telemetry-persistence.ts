@@ -106,7 +106,7 @@ export function restoreTelemetryFromSession(ctx: any, state: RuntimeState): bool
 		state.engine.prune.impact.lastSummarizeResponse ??= latestPruneDebug.response;
 		state.engine.prune.impact.lastAcceptedSummaries ??= latestPruneDebug.acceptedSummaries;
 		state.engine.prune.impact.lastSummarizeMaxTokens ??= latestPruneDebug.maxTokens;
-		state.engine.prune.impact.lastError ??= latestPruneDebug.error;
+		state.engine.prune.impact.lastErrorKey ??= latestPruneDebug.errorKey;
 	}
 	return true;
 }
