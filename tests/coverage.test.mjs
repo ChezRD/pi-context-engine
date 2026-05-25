@@ -1446,6 +1446,22 @@ describe("HugeResultStore", () => {
 		const store = new m.HugeResultStore();
 		assert.equal(store.get("unknown"), undefined);
 	});
+	it("records empty text and non-string tool metadata without losing byte/ref accounting", () => {
+		const persisted = [];
+		const store = new m.HugeResultStore((record) => persisted.push(record));
+		const empty = store.remember("", 42, undefined);
+		assert.equal(empty.ref, "dsc-result-1");
+		assert.equal(empty.bytes, 0);
+		assert.equal(empty.text, "");
+		assert.equal(empty.toolCallId, 42);
+		assert.equal(persisted.length, 1);
+
+		const oddTool = store.remember("payload", null, "Tool Name With Spaces");
+		assert.equal(oddTool.ref, "dsc-tool-name-with-space-2");
+		assert.equal(oddTool.bytes, Buffer.byteLength("payload"));
+		assert.equal(oddTool.toolCallId, null);
+		assert.equal(store.get(oddTool.ref).text, "payload");
+	});
 });
 
 describe("maybeCapToolResult", () => {
@@ -1996,6 +2012,90 @@ describe("auto-compact", () => {
 		assert.equal(state.engine.prune.pendingBatches.length, 0);
 		assert.ok(state.engine.prune.appliedIds.includes("tc-1"));
 		assert.ok(notices.some((notice) => notice.level === "info"));
+	});
+
+	it("handleAgentMessagePrune ignores concurrent flush attempts while one summary request is running", async () => {
+		const state = makeState();
+		Object.assign(state.config, { pruneOn: "agent-message", pruneBatchSize: 1 });
+		state.engine.turnIndex = 5;
+		state.engine.prune.batchStepCounter = 1;
+		state.engine.prune.pendingBatches = [{
+			turnIndex: 0,
+			context: "inspect src/race.ts",
+			toolCalls: [{ id: "tc-race", name: "read", turnIndex: 0, args: "{\"path\":\"src/race.ts\"}", result: "export const race = true;\n".repeat(80) }],
+		}];
+		let completeCalls = 0;
+		const branch = [
+			{ type: "message", turnIndex: 0, message: { role: "assistant", tool_calls: [{ id: "tc-race", function: { name: "read", arguments: "{\"path\":\"src/race.ts\"}" } }] } },
+			{ type: "message", turnIndex: 0, message: { role: "tool", toolCallId: "tc-race", content: "export const race = true;" } },
+		];
+		const ctx = {
+			sessionManager: { getBranch: async () => branch },
+			ui: { notify: () => {} },
+		};
+		const pi = {
+			complete: async () => {
+				completeCalls++;
+				await new Promise((resolve) => setTimeout(resolve, 20));
+				return {
+					content: "{\"summaries\":[{\"batchIndex\":0,\"coverage\":\"complete\",\"summary\":\"Read src/race.ts; race export confirmed.\"}]}",
+					usage: { input: 100, output: 20, cacheRead: 0 },
+				};
+			},
+		};
+
+		await Promise.all([
+			m.handleAgentMessagePrune(pi, ctx, state, { message: { role: "assistant", content: "done" } }),
+			m.handleAgentMessagePrune(pi, ctx, state, { message: { role: "assistant", content: "done" } }),
+		]);
+
+		assert.equal(completeCalls, 1);
+		assert.equal(state.engine.prune.isFlushing, false);
+		assert.equal(state.engine.prune.pruneRunCount, 1);
+		assert.equal(state.engine.prune.pendingBatches.length, 0);
+		assert.ok(state.engine.prune.appliedIds.includes("tc-race"));
+	});
+
+	it("handleAgentMessagePrune keeps batches appended while a flush is already in flight", async () => {
+		const state = makeState();
+		Object.assign(state.config, { pruneOn: "agent-message", pruneBatchSize: 1 });
+		state.engine.turnIndex = 5;
+		state.engine.prune.batchStepCounter = 1;
+		state.engine.prune.pendingBatches = [{
+			turnIndex: 0,
+			context: "read src/first.ts",
+			toolCalls: [{ id: "tc-first", name: "read", turnIndex: 0, args: "{\"path\":\"src/first.ts\"}", result: "export const first = true;\n".repeat(80) }],
+		}];
+		const branch = [
+			{ type: "message", turnIndex: 0, message: { role: "assistant", tool_calls: [{ id: "tc-first", function: { name: "read", arguments: "{\"path\":\"src/first.ts\"}" } }] } },
+			{ type: "message", turnIndex: 0, message: { role: "tool", toolCallId: "tc-first", content: "export const first = true;" } },
+		];
+		const ctx = {
+			sessionManager: { getBranch: async () => branch },
+			ui: { notify: () => {} },
+		};
+		const pi = {
+			complete: async () => {
+				state.engine.prune.pendingBatches.push({
+					turnIndex: 1,
+					context: "read src/second.ts",
+					toolCalls: [{ id: "tc-second", name: "read", turnIndex: 1, args: "{\"path\":\"src/second.ts\"}", result: "export const second = true;\n".repeat(80) }],
+				});
+				return {
+					content: "{\"summaries\":[{\"batchIndex\":0,\"coverage\":\"complete\",\"summary\":\"Read src/first.ts; first export confirmed.\"}]}",
+					usage: { input: 100, output: 20, cacheRead: 0 },
+				};
+			},
+		};
+
+		await m.handleAgentMessagePrune(pi, ctx, state, { message: { role: "assistant", content: "done" } });
+
+		assert.equal(state.engine.prune.isFlushing, false);
+		assert.ok(state.engine.prune.appliedIds.includes("tc-first"));
+		assert.equal(state.engine.prune.appliedIds.includes("tc-second"), false);
+		assert.equal(state.engine.prune.pendingBatches.length, 1);
+		assert.equal(state.engine.prune.pendingBatches[0].toolCalls[0].id, "tc-second");
+		assert.equal(state.engine.prune.awaitingAgentMessage, true);
 	});
 
 	it("handleTurnEnd returns early when the extension is disabled", async () => {

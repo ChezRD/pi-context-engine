@@ -173,14 +173,14 @@ describe("summarizeToolBatch", () => {
 			"<model_visible_context schema=\"pi.model_visible_context.v1\" kind=\"context_result_truncated\" ui=\"custom-rendered\">",
 			"<payload name=\"lookup\">",
 			"[context_result_lookup kind=slice ref=dsc-read-1 offset=0 limit=10 range=0:10 returned_chars=10 total_chars=10 bytes=10 has_more=false]",
-			"abcdefghij",
+			"AlphaBeta!",
 			"</payload>",
 			"<payload name=\"preview\">",
 			"preview text",
 			"</payload>",
 			"</model_visible_context>",
 		].join("\n"));
-		assert.equal(normalized, "Result metadata: kind=slice ref=dsc-read-1 offset=0 limit=10 range=0:10 returned_chars=10 total_chars=10 total_bytes=10 has_more=false\nabcdefghij");
+		assert.equal(normalized, "Result metadata: kind=slice ref=dsc-read-1 offset=0 limit=10 range=0:10 returned_chars=10 total_chars=10 total_bytes=10 has_more=false\nAlphaBeta!");
 	});
 
 	it("falls back to preview text when model-visible lookup payload contains only the lookup header", () => {
@@ -352,7 +352,7 @@ describe("summarizeToolBatch", () => {
 						"<model_visible_context schema=\"pi.model_visible_context.v1\" kind=\"context_result_truncated\" ui=\"custom-rendered\">",
 						"<payload name=\"lookup\">",
 						"[context_result_lookup kind=slice ref=dsc-read-1 offset=0 limit=10 range=0:10 returned_chars=10 total_chars=10 bytes=10 has_more=false]",
-						"abcdefghij",
+						"AlphaBeta!",
 						"</payload>",
 						"<payload name=\"preview\">",
 						"preview text",
@@ -367,7 +367,7 @@ describe("summarizeToolBatch", () => {
 		assert.match(prompts[0], /"result_metadata": \{/);
 		assert.match(prompts[0], /"ref": "dsc-read-1"/);
 		assert.match(prompts[0], /"returned_chars": 10/);
-		assert.match(prompts[0], /abcdefghij/);
+		assert.match(prompts[0], /AlphaBeta!/);
 		assert.doesNotMatch(prompts[0], /<model_visible_context/);
 	});
 
@@ -752,7 +752,7 @@ describe("captureBatches context", () => {
 							"<model_visible_context schema=\"pi.model_visible_context.v1\" kind=\"context_result_truncated\" ui=\"custom-rendered\">",
 							"<payload name=\"lookup\">",
 							"[context_result_lookup kind=slice ref=dsc-read-7 offset=0 limit=10 range=0:10 returned_chars=10 total_chars=10 bytes=10 has_more=false]",
-							"abcdefghij",
+							"AlphaBeta!",
 							"</payload>",
 							"</model_visible_context>",
 						].join("\n"),

@@ -278,6 +278,7 @@ export interface PruneState {
 	batchStepCounter: number;
 	checkpointTriggered?: boolean;
 	awaitingAgentMessage?: boolean;
+	isFlushing?: boolean;
 	awaitingImpact?: {
 		turn: number;
 		appliedIds: string[];
