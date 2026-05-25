@@ -21,6 +21,12 @@ function formatMoney(value: number, digits = 4): string {
 	return value < 0 ? `-$${Math.abs(value).toFixed(digits)}` : `$${value.toFixed(digits)}`;
 }
 
+function formatConfigValue(cfg: RuntimeState["config"], value: string): string {
+	const key = `ui.settings.value.${value}`;
+	const label = t(cfg, key);
+	return label === key ? value : label;
+}
+
 function aggregateModelsWithAux(state: RuntimeState): Array<{
 	modelId: string;
 	provider?: string;
@@ -247,15 +253,33 @@ function buildCacheLines(state: RuntimeState | undefined, theme: any): string[] 
 		const snapActualCost = (state.stats.usages ?? []).reduce((sum, usage) => sum + (usage.actualCost ?? usage.cost ?? 0), 0);
 		const snapSavings = (state.stats.usages ?? []).reduce((sum, usage) => sum + (usage.savings ?? 0), 0);
 		const pruneSummaryCost = state.engine.prune.impact?.summarizeCost ?? 0;
+		const pruneSummaryCacheRead = state.engine.prune.impact?.summarizeCacheReadTokens ?? 0;
+		const pruneSummaryInput = state.engine.prune.impact?.summarizeInputTokens ?? 0;
+		const pruneSummaryOutput = state.engine.prune.impact?.summarizeOutputTokens ?? 0;
+		const pruneSummaryHit = hitRatio(pruneSummaryInput, pruneSummaryCacheRead, 0);
 		const pruneImpactCost = pruneNegativeImpactCost(state);
 		const netSavings = pruneAdjustedSavings(state);
-		const actualWithPruneStr = snapActualCost + pruneSummaryCost > 0 ? `$${(snapActualCost + pruneSummaryCost).toFixed(4)}` : "$0.00";
+		const sessionCostStr = snapActualCost > 0 ? `$${snapActualCost.toFixed(4)}` : "$0.00";
+		const pruneCostStr = pruneImpactCost > 0 ? `$${pruneImpactCost.toFixed(4)}` : "$0.00";
+		const summaryCostStr = formatMoney(pruneSummaryCost);
+		const missImpactStr = formatMoney(state.engine.prune.impact?.postPruneMissCost ?? 0);
+		const totalActualStr = snapActualCost + pruneSummaryCost > 0 ? `$${(snapActualCost + pruneSummaryCost).toFixed(4)}` : "$0.00";
 		const noCacheStr = snapNoCacheCost > 0 ? `$${snapNoCacheCost.toFixed(4)}` : "n/a";
 		const netSavingsStr = formatMoney(netSavings);
 		const netColor = netSavings >= 0 ? "success" : "error";
-		lines.push(`${theme.fg("muted", t(cfg, "ui.dashboard.cost"))}  ${theme.fg("text", `${t(cfg, "ui.dashboard.actualCost")} ${actualWithPruneStr}`)} ${theme.fg("warning", `· ${t(cfg, "ui.dashboard.noCacheCost")} ${noCacheStr}`)} ${theme.fg(netColor, `· ${t(cfg, "ui.dashboard.cacheSaved")} ${netSavingsStr}`)}`);
+		lines.push(`${theme.fg("muted", t(cfg, "ui.dashboard.cost"))}  ${theme.fg("text", t(cfg, "ui.dashboard.costLine", { paid: totalActualStr, session: sessionCostStr, summary: summaryCostStr, miss: missImpactStr, noCache: noCacheStr, saved: netSavingsStr, actual: totalActualStr, prune: pruneCostStr }))}`);
 		if (pruneImpactCost > 0) {
-			lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.netSavingsHelp", { gross: formatMoney(snapSavings), impact: formatMoney(pruneImpactCost) })}`));
+			lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.costBreakdown", { session: sessionCostStr, summary: summaryCostStr, miss: missImpactStr, saved: netSavingsStr, gross: formatMoney(snapSavings), impact: formatMoney(pruneImpactCost) })}`));
+		}
+		if (pruneSummaryCost > 0) {
+			lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneSummaryCacheLine", {
+				requests: state.engine.prune.impact?.summarizeRequests ?? 0,
+				input: formatTokenCount(pruneSummaryInput),
+				cache: formatTokenCount(pruneSummaryCacheRead),
+				output: formatTokenCount(pruneSummaryOutput),
+				hit: formatRatio(pruneSummaryHit),
+				cost: summaryCostStr,
+			})}`));
 		}
 		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.cacheDeltaHelp")} · ${state.stats.requests} ${t(cfg, "ui.dashboard.reqs")}`));
 
@@ -345,6 +369,9 @@ function pruneNextLabel(state: RuntimeState): string {
 
 function buildPruneLines(state: RuntimeState, theme: any): string[] {
 	const cfg = state.config;
+	const verbosity = cfg.dashboardVerbosity ?? "normal";
+	const showVerbose = verbosity === "verbose" || verbosity === "debug";
+	const showDebug = verbosity === "debug";
 	const done = state.engine.prune.pruneRunCount;
 	const summarized = state.engine.prune.summarizedIds.length;
 	const applied = state.engine.prune.appliedIds.length;
@@ -354,10 +381,25 @@ function buildPruneLines(state: RuntimeState, theme: any): string[] {
 	const impact = state.engine.prune.impact;
 	const target = Math.max(1, cfg.pruneBatchSize);
 	const progress = cfg.pruneEnabled ? `${Math.min(state.engine.prune.batchStepCounter, target)}/${target}` : t(cfg, "status.pruneNext.off");
+	const current = Math.min(state.engine.prune.batchStepCounter, target);
+	const remaining = Math.max(0, target - current);
+	const queueText = pending > 0 ? `${pending}/${batches}` : t(cfg, "ui.dashboard.queueEmpty");
+	const stateKey = !cfg.pruneEnabled
+		? "ui.dashboard.pruneState.off"
+		: pending > 0 && cfg.pruneOn === "agent-message" && state.engine.prune.awaitingAgentMessage
+			? "ui.dashboard.pruneState.waitingAgent"
+			: pending > 0 && current >= target
+				? "ui.dashboard.pruneState.ready"
+				: pending > 0
+					? "ui.dashboard.pruneState.collecting"
+					: "ui.dashboard.pruneState.idle";
+	const nextText = pending > 0 && current >= target ? t(cfg, "status.pruneNext.now") : t(cfg, "ui.dashboard.nextSteps", { steps: remaining || target });
 	const lines = [
-		`${theme.fg("muted", t(cfg, "ui.dashboard.pruneLabel"))}  ${theme.fg("text", `${t(cfg, "ui.dashboard.pruneMode")} ${cfg.pruneOn}`)} ${theme.fg("success", `· ${t(cfg, "ui.dashboard.pruneDone")} ${done}`)} ${theme.fg("dim", `· ${t(cfg, "ui.dashboard.pruneSummarized")} ${summarized}`)} ${theme.fg("warning", `· ${t(cfg, "ui.dashboard.prunePending")} ${pending}/${batches}`)} ${theme.fg("accent", `· ${t(cfg, "ui.dashboard.pruneNext")} ${pruneNextLabel(state)}`)}`,
-		theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneProgress", { progress, target })} · ${t(cfg, "ui.dashboard.pruneApplied", { applied, summarized, unapplied })}`),
+		`${theme.fg("muted", t(cfg, "ui.dashboard.pruneLabel"))}  ${theme.fg("text", `${t(cfg, "ui.dashboard.pruneMode")} ${formatConfigValue(cfg, cfg.pruneOn)}`)} ${theme.fg("success", `· ${t(cfg, stateKey)}`)} ${theme.fg("dim", `· ${t(cfg, "ui.dashboard.prunePending")} ${queueText}`)} ${theme.fg("accent", `· ${t(cfg, "ui.dashboard.pruneNext")} ${nextText}`)}`,
 	];
+	if (verbosity !== "compact") {
+		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneApplied", { applied, summarized, unapplied })}${showVerbose ? ` · ${t(cfg, "ui.dashboard.pruneProgress", { progress, target })}` : ""}`));
+	}
 	if (impact) {
 		const summaryCost = `$${impact.summarizeCost.toFixed(4)}`;
 		const lastSummaryCost = `$${(impact.lastSummarizeCost ?? 0).toFixed(4)}`;
@@ -369,21 +411,32 @@ function buildPruneLines(state: RuntimeState, theme: any): string[] {
 		const lastRawChars = formatTokenCount(impact.lastSummarizeRawChars ?? 0);
 		const lastSummaryChars = formatTokenCount(impact.lastSummarizeSummaryChars ?? 0);
 		const deltaChars = formatTokenCount(Math.max(0, (impact.lastSummarizeRawChars ?? 0) - (impact.lastSummarizeSummaryChars ?? 0)));
-		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneSummaryImpact", { requests: impact.summarizeRequests, tokens: formatTokenCount(impact.summarizeInputTokens + impact.summarizeOutputTokens), cost: summaryCost, last: lastSummaryCost })}`));
-		lines.push(theme.fg("success", `  ${t(cfg, "ui.dashboard.pruneSliceImpact", { raw: rawChars, summary: summaryChars, delta: deltaChars, lastRaw: lastRawChars, lastSummary: lastSummaryChars })}`));
+		if (showVerbose) lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneSummaryImpact", { requests: impact.summarizeRequests, tokens: formatTokenCount(impact.summarizeInputTokens + impact.summarizeOutputTokens), cost: summaryCost, last: lastSummaryCost })}`));
+		if (impact.lastSummarizeRawChars || showVerbose) {
+			const sliceKey = showVerbose ? "ui.dashboard.pruneSliceImpact" : "ui.dashboard.pruneSliceCompact";
+			lines.push(`  ${theme.fg("success", t(cfg, "ui.dashboard.pruneSummaryBenefit", { raw: rawChars, summary: summaryChars, delta: deltaChars }))} ${theme.fg("dim", `· ${t(cfg, "ui.dashboard.pruneSummaryCost", { requests: impact.summarizeRequests, cost: summaryCost })}`)}`);
+			if (showVerbose) lines.push(theme.fg("dim", `  ${t(cfg, sliceKey, { raw: rawChars, summary: summaryChars, delta: deltaChars, lastRaw: lastRawChars, lastSummary: lastSummaryChars, requests: impact.summarizeRequests, cost: summaryCost })}`));
+		}
 		if (impact.lastRebuildSourceMessages !== undefined) {
-			lines.push(theme.fg("success", `  ${t(cfg, "ui.dashboard.pruneRebuildImpact", {
+			const rebuildNewlyApplied = impact.lastRebuildNewlyApplied ?? 0;
+			const rebuildSavedApproxChars = rebuildNewlyApplied > 0 ? (impact.lastRebuildSavedApproxChars ?? 0) : 0;
+			const rebuildKey = rebuildNewlyApplied > 0 || showVerbose ? "ui.dashboard.pruneRebuildImpact" : "ui.dashboard.pruneRebuildAlreadyApplied";
+			lines.push(theme.fg("success", `  ${t(cfg, rebuildKey, {
 				source: impact.lastRebuildSourceMessages,
 				output: impact.lastRebuildOutputMessages ?? 0,
 				prunable: impact.lastRebuildPrunableIds ?? 0,
-				applied: impact.lastRebuildNewlyApplied ?? 0,
-				saved: formatTokenCount(impact.lastRebuildSavedApproxChars ?? 0),
+				applied: rebuildNewlyApplied,
+				saved: formatTokenCount(rebuildSavedApproxChars),
 				checkpoint: impact.lastRebuildCheckpointOpened ? t(cfg, "status.yes") : t(cfg, "status.no"),
 			})}`));
 		}
-		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneMissImpact", { requests: impact.postPruneRequests, miss: formatTokenCount(impact.lastPostPruneMissTokens ?? 0), cache: formatTokenCount(impact.postPruneCacheReadTokens), cost: lastMissCost, last: lastMissCost, hit: lastHit })}`));
-		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneRegret", { lookup: impact.postPruneLookupRegret ?? 0, read: impact.postPruneReadRegret ?? 0, foldRead: impact.postFoldReadRegret ?? 0 })}`));
-		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.prunePreservedDuringFlush", { batches: impact.pendingBatchesPreservedDuringFlush ?? 0, tools: impact.pendingToolCallsPreservedDuringFlush ?? 0, lastBatches: impact.lastPendingBatchesPreservedDuringFlush ?? 0, lastTools: impact.lastPendingToolCallsPreservedDuringFlush ?? 0 })}`));
+		if (impact.postPruneRequests > 0 || showVerbose) lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneMissImpact", { requests: impact.postPruneRequests, miss: formatTokenCount(impact.lastPostPruneMissTokens ?? 0), cache: formatTokenCount(impact.postPruneCacheReadTokens), cost: lastMissCost, last: lastMissCost, hit: lastHit })}`));
+		const hasRegret = (impact.postPruneLookupRegret ?? 0) > 0 || (impact.postPruneReadRegret ?? 0) > 0 || (impact.postFoldReadRegret ?? 0) > 0;
+		if (hasRegret || showDebug) lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneRegret", { lookup: impact.postPruneLookupRegret ?? 0, read: impact.postPruneReadRegret ?? 0, foldRead: impact.postFoldReadRegret ?? 0 })}`));
+		const hasPreserved = (impact.pendingBatchesPreservedDuringFlush ?? 0) > 0 || (impact.pendingToolCallsPreservedDuringFlush ?? 0) > 0;
+		if (hasPreserved || showDebug) lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.prunePreservedDuringFlush", { batches: impact.pendingBatchesPreservedDuringFlush ?? 0, tools: impact.pendingToolCallsPreservedDuringFlush ?? 0, lastBatches: impact.lastPendingBatchesPreservedDuringFlush ?? 0, lastTools: impact.lastPendingToolCallsPreservedDuringFlush ?? 0 })}`));
+		const hasNoOp = (impact.noOpToolCalls ?? 0) > 0 || (impact.lastNoOpToolCalls ?? 0) > 0;
+		if (hasNoOp || showDebug) lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneNoOpCoverage", { total: impact.noOpToolCalls ?? 0, last: impact.lastNoOpToolCalls ?? 0 })}`));
 		if (impact.lastErrorKey) {
 			lines.push(theme.fg("warning", `  ${t(cfg, "ui.dashboard.pruneError", { error: t(cfg, impact.lastErrorKey) })}`));
 		}

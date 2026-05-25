@@ -157,7 +157,7 @@ function registerLifecycleHandlers(pi: ExtensionAPI, withCtx: (ctx?: any) => any
 		const liveCtx = withCtx(ctx);
 		state.config = readConfig();
 		if (!state.config.enabled) return undefined;
-		handleBeforeProviderRequest(event, liveCtx, state);
+		await handleBeforeProviderRequest(event, pi, liveCtx, state);
 		state.engine.pendingUsageModelId = state.engine.lastProviderModelId ?? state.detection.modelId;
 		state.engine.pendingUsageProvider = liveCtx?.model?.provider ?? state.detection.provider;
 		if (!state.config.diagnostics) return undefined;

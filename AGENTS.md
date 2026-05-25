@@ -34,6 +34,18 @@
 - Preserve user work; do not overwrite unrelated changes.
 - Prefer Markdown for plans and notes, and keep code and docs aligned.
 
+## i18n
+
+- Follow `docs/i18n-workflow.md` for locale changes.
+- Do not rewrite whole locale files for a single string change.
+- After locale edits, run `npm run i18n:sort` and `npm run i18n:audit`.
+- For semantic translation quality, run `npm run i18n:audit -- --llm-review=<locale>`.
+- For terminology-sensitive translation quality, run `npm run i18n:audit -- --llm-review=<locale> --llm-web` and use web search before editing.
+- For package-level model review, run `npm run i18n:audit -- --llm-review=<locale> --llm-pack-file=<path>`, then pass that file to Pi or another model outside the audit script.
+- Model review runs are consultants only. They must not call interactive user-input tools or decide edits; they return advisory JSON, and the agent running the workflow decides whether to change locale files.
+- Pi review is package-level structured JSON: the prompt must include full `en`, full target locale or locales, related `en`/target locale slices, and selected audit findings. For `--llm-review=all`, keep one prompt and require one response object with `locales[]`; do not split into markdown-separated prompts or isolated one-off fragments.
+- Run Pi review with tools disabled, e.g. `pi --model deepseek/deepseek-v4-flash --thinking high --no-session --no-tools -p < /tmp/ru-i18n-review.txt`. If Pi returns `verdict="uncertain"` or only low-confidence recommendations, the caller performs web search outside Pi, records the evidence, then either applies a justified edit or asks the user.
+
 ## Planning
 
 - Use the `planning` skill for any multi-step task.

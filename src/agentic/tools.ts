@@ -97,7 +97,7 @@ export function registerAgenticTools(pi: any, state?: { cacheState?: RuntimeStat
 
 			const currentLeaf = sm.getLeafId?.();
 			if (currentLeaf === tid) {
-				return { content: [{ type: "text", text: t("tool.rewind.error.alreadyAtTarget", { tid }) }], details: {} };
+				return { content: [{ type: "text", text: t("tool.rewind.error.alreadyAtTarget", { id: tid }) }], details: {} };
 			}
 
 			// Optional backup checkpoint

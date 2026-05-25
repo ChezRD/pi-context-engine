@@ -655,6 +655,8 @@ test("executePrune uses explicit summarizer override and skips inefficient repla
   assert.equal(usedModel, "custom-summarizer");
   assert.equal(result.details.reason, "skipped_oversized");
   assert.equal(result.details.skippedOversized, 1);
+  assert.equal(state.engine.prune.impact.lastNoOpToolCalls, 1);
+  assert.match(result.text, /left unchanged|оставлено/i);
 });
 
 test("executePrune masks empty or malformed summarizer responses for large tool results", async () => {
@@ -1313,7 +1315,7 @@ test("huge result capper elides only above threshold and preserves recovery deta
   assert.match(result.content[0].text, new RegExp(`<model_visible_context schema="${MODEL_VISIBLE_CONTEXT_SCHEMA}" kind="context_result_truncated" ui="custom-rendered">`));
   assert.match(result.content[0].text, /<instructions>\nThis is segment 1\/2 of a 15-byte tool output; configured segment size is 10 chars\./);
   assert.ok(result.content[0].text.indexOf("<instructions>") < result.content[0].text.indexOf("<metadata>"));
-  assert.match(result.content[0].text, /Next segment: call context_result_lookup with ref="dsc-bash-1", offset=10, limit=10; 1 segment\(s\) remain\./);
+  assert.match(result.content[0].text, /Next segment: call context_result_lookup with ref="dsc-bash-1", offset=10, limit=5; 1 segment\(s\) remain\. Never request limit greater than 10 or greater than remaining chars\./);
   assert.match(result.content[0].text, /<metadata>/);
   assert.match(result.content[0].text, /"recovery":/);
   assert.match(result.content[0].text, /"tool": "context_result_lookup"/);
@@ -1323,7 +1325,7 @@ test("huge result capper elides only above threshold and preserves recovery deta
   assert.match(result.content[0].text, /Next segment: call context_result_lookup with ref="dsc-bash-1", offset=\d+, limit=\d+; \d+ segment\(s\) remain/);
   assert.match(result.content[0].text, /"arguments":/);
   assert.match(result.content[0].text, /dsc-bash-1/);
-  assert.match(result.content[0].text, /\[context_result_lookup kind=slice ref=dsc-bash-1 offset=0 limit=15 range=0:15 returned_chars=15 total_chars=15 bytes=15 has_more=false\]/);
+  assert.match(result.content[0].text, /\[context_result_lookup kind=slice ref=dsc-bash-1 offset=0 limit=10 range=0:\d+ returned_chars=\d+ total_chars=15 bytes=15 has_more=true next_offset=10\]/);
   assert.deepEqual(result.details, { elidedBy: "pi-context-engine", ref: "dsc-bash-1", bytes: 15 });
   const record = store.get("dsc-bash-1");
   assert.equal(record.toolCallId, "1");
@@ -1343,7 +1345,7 @@ test("huge result capper elides only above threshold and preserves recovery deta
   assert.equal(partialLookup.details.limit, 5);
   const theme = { fg: (_name, value) => value, bold: (value) => value };
   const collapsedLookup = lookupTool.renderResult(partialLookup, { expanded: false }, theme).text;
-  assert.match(collapsedLookup, /dsc-bash-1 · chars 5-10 \/ 15 chars · limit 5/);
+  assert.doesNotMatch(collapsedLookup, /dsc-bash-1 · chars 5-10 \/ 15 chars · limit 5/);
   assert.match(collapsedLookup, /slice/);
   assert.doesNotMatch(collapsedLookup, /\[context_result_lookup kind=slice/);
   const expandedLookup = lookupTool.renderResult(partialLookup, { expanded: true }, theme).text;
@@ -1367,7 +1369,7 @@ test("huge result capper uses configured char threshold instead of preview or by
   const capped = maybeCapToolResult({ content: [{ type: "text", text: "abcde" }], toolCallId: "3", toolName: "bash" }, config, store);
   assert.ok(capped);
   assert.match(capped.content[0].text, /configured segment size is 4 chars/);
-  assert.match(capped.content[0].text, /Next segment: call context_result_lookup with ref="dsc-bash-1", offset=4, limit=4/);
+  assert.match(capped.content[0].text, /Next segment: call context_result_lookup with ref="dsc-bash-1", offset=4, limit=1/);
   assert.match(capped.content[0].text, /"limit": 4/);
 });
 
@@ -1456,9 +1458,9 @@ test("huge result preview renderer shows first output and expands from local sto
   const expanded = renderStoredHugeResult(result, true, theme, store).text;
   assert.match(collapsed, /first/);
   assert.match(expanded, /third/);
-  assert.match(collapsed, /context_result_lookup \[ref=dsc-read-1\]/);
+  assert.doesNotMatch(collapsed, /context_result_lookup/);
   assert.doesNotMatch(expanded, /context_result_lookup/);
-  assert.match(collapsed, /\[ref dsc-read-1\]/);
+  assert.doesNotMatch(collapsed, /\[ref dsc-read-1\]/);
 });
 
 test("lookup tool handles offset past end, negative offset, limit zero, and missing stored record in renderer", async () => {
@@ -1478,7 +1480,7 @@ test("lookup tool handles offset past end, negative offset, limit zero, and miss
   assert.equal(limitZero.content[0].text, "[context_result_lookup kind=slice ref=dsc-read-1 offset=4 limit=0 range=4:4 returned_chars=0 total_chars=16 bytes=16 has_more=true next_offset=4]\n");
 
   const theme = { fg: (_name, value) => value, bold: (value) => value };
-  assert.match(lookupTool.renderCall({}, theme).text, /context_result_lookup \? · chars from 0/);
+  assert.match(lookupTool.renderCall({}, theme).text, /context_result_lookup \[ref=\?\]/);
   assert.equal(lookupTool.renderResult({ content: null, details: {} }, { expanded: false }, theme).text, "");
 
   const previewOnly = {
@@ -1487,7 +1489,7 @@ test("lookup tool handles offset past end, negative offset, limit zero, and miss
   };
   const rendered = renderStoredHugeResult(previewOnly, false, theme, store).text;
   assert.match(rendered, /preview only/);
-  assert.match(rendered, /source bash/);
+  assert.doesNotMatch(rendered, /source bash/);
 });
 
 // Token counting edge cases (from semantic-fold.ts)

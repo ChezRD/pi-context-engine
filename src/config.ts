@@ -28,9 +28,11 @@ export interface ExtensionConfig {
 	pruneIncludeContext: boolean;
 	pruneBatchSize: number;
 	pruneBridgeLength: number;
+	pruneAgentMessageFallback: "off" | "before-provider";
 	toolIntentNudge: boolean;
 	toolIntentNudgeMinConfidence: "high" | "medium" | "low";
 	toolIntentNudgeMaxChars: number;
+	dashboardVerbosity: "compact" | "normal" | "verbose" | "debug";
 	statusBarStyle: "blocks" | "sparkline" | "text";
 	autoFold: boolean;
 	foldTailPct: number;
@@ -122,9 +124,11 @@ export const DEFAULT_CONFIG: ExtensionConfig = {
 	pruneIncludeContext: false,
 	pruneBatchSize: 5,
 	pruneBridgeLength: 2,
+	pruneAgentMessageFallback: "before-provider",
 	toolIntentNudge: true,
 	toolIntentNudgeMinConfidence: "medium",
 	toolIntentNudgeMaxChars: 500,
+	dashboardVerbosity: "normal",
 	statusBarStyle: "sparkline",
 	foldThreshold: 0.75,
 	aggressiveFoldThreshold: 0.78,
@@ -161,6 +165,10 @@ function pruneMode(value: unknown, fallback: string): string {
 	return ["every-turn", "checkpoint", "on-demand", "agent-message", "agentic-auto"].includes(normalized) ? normalized : fallback;
 }
 
+function pruneAgentMessageFallback(value: unknown, fallback: "off" | "before-provider"): "off" | "before-provider" {
+	return value === "off" || value === "before-provider" ? value : fallback;
+}
+
 function num(value: unknown, fallback: number, min = 0): number {
 	return typeof value === "number" && Number.isFinite(value) && value >= min ? value : fallback;
 }
@@ -172,6 +180,10 @@ function intRange(value: unknown, fallback: number, min: number, max: number): n
 
 function confidence(value: unknown, fallback: "high" | "medium" | "low"): "high" | "medium" | "low" {
 	return value === "high" || value === "medium" || value === "low" ? value : fallback;
+}
+
+function dashboardVerbosity(value: unknown, fallback: "compact" | "normal" | "verbose" | "debug"): "compact" | "normal" | "verbose" | "debug" {
+	return value === "compact" || value === "normal" || value === "verbose" || value === "debug" ? value : fallback;
 }
 
 function pct(value: unknown, fallback: number): number {
@@ -232,9 +244,11 @@ export function parseConfig(value: unknown): ExtensionConfig {
 		pruneIncludeContext: bool(value.pruneIncludeContext, DEFAULT_CONFIG.pruneIncludeContext),
 		pruneBatchSize: intRange(value.pruneBatchSize, DEFAULT_CONFIG.pruneBatchSize, 1, 20),
 		pruneBridgeLength: intRange(value.pruneBridgeLength, DEFAULT_CONFIG.pruneBridgeLength, 1, 8),
+		pruneAgentMessageFallback: pruneAgentMessageFallback(value.pruneAgentMessageFallback, DEFAULT_CONFIG.pruneAgentMessageFallback),
 		toolIntentNudge: bool(value.toolIntentNudge, DEFAULT_CONFIG.toolIntentNudge),
 		toolIntentNudgeMinConfidence: confidence(value.toolIntentNudgeMinConfidence, DEFAULT_CONFIG.toolIntentNudgeMinConfidence),
 		toolIntentNudgeMaxChars: intRange(value.toolIntentNudgeMaxChars, DEFAULT_CONFIG.toolIntentNudgeMaxChars, 120, 1200),
+		dashboardVerbosity: dashboardVerbosity(value.dashboardVerbosity, DEFAULT_CONFIG.dashboardVerbosity),
 		statusBarStyle: (value.statusBarStyle === "blocks" || value.statusBarStyle === "sparkline" || value.statusBarStyle === "text") ? value.statusBarStyle : DEFAULT_CONFIG.statusBarStyle,
 		foldThreshold: pct(value.foldThreshold, DEFAULT_CONFIG.foldThreshold),
 		aggressiveFoldThreshold: pct(value.aggressiveFoldThreshold, DEFAULT_CONFIG.aggressiveFoldThreshold),

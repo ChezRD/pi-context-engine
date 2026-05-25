@@ -182,6 +182,7 @@ export async function executePrune(
 	let summarized = 0;
 	let skippedOversized = 0;
 	const acceptedSummaries: string[] = [];
+	if (runtimeState) runtimeState.engine.prune.impact.lastNoOpToolCalls = 0;
 	for (let i = 0; i < usableBatches.length; i++) {
 		const batch = usableBatches[i];
 		let result = results[i];
@@ -218,6 +219,11 @@ export async function executePrune(
 			summarized++;
 		}
 	}
+	if (runtimeState && skippedOversized > 0) {
+		const impact = runtimeState.engine.prune.impact;
+		impact.noOpToolCalls = (impact.noOpToolCalls ?? 0) + skippedOversized;
+		impact.lastNoOpToolCalls = skippedOversized;
+	}
 	if (acceptedSummaries.length > 0) {
 		emitPruneSummaryMessage(
 			pi,
@@ -250,7 +256,7 @@ export async function executePrune(
 	if (runtimeState) persistTelemetry(pi, runtimeState);
 
 	return {
-		text: summarized > 0 ? t("tool.prune.summarized", { count: summarized }) : skippedOversized > 0 ? t("tool.prune.skippedOversized", { count: skippedOversized }) : t("tool.prune.noneSummarized"),
+		text: summarized > 0 ? t("tool.prune.summarized", { count: summarized }) : skippedOversized > 0 ? t("tool.prune.noOp", { count: skippedOversized }) : t("tool.prune.noneSummarized"),
 		details: {
 			summarized,
 			skippedOversized,

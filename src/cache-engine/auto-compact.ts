@@ -206,6 +206,21 @@ export async function handleAgentMessagePrune(pi: any, ctx: any, state: RuntimeS
 	await flushPendingPrune(pi, ctx, state);
 }
 
+export async function flushAgentMessagePruneFallback(pi: any, ctx: any, state: RuntimeState): Promise<boolean> {
+	if (!state.config.enabled || !state.config.pruneEnabled || state.config.pruneOn !== "agent-message") return false;
+	if (state.config.pruneAgentMessageFallback !== "before-provider") return false;
+	const target = Math.max(1, state.config.pruneBatchSize);
+	const skipIds = [...state.engine.prune.summarizedIds, ...state.engine.prune.appliedIds, ...(state.engine.prune.skippedOversizedIds ?? []), ...(state.engine.prune.skippedMissingResultIds ?? [])];
+	const branch = await ctx?.sessionManager?.getBranch?.();
+	if (branch) captureBatches(branch, skipIds, state.engine.prune, state.engine.turnIndex, { bridgeLength: state.config.pruneBridgeLength });
+	const hasPendingTools = state.engine.prune.pendingBatches.some((batch) => batch.toolCalls.length > 0);
+	if (!hasPendingTools || state.engine.prune.batchStepCounter < target || state.engine.prune.isFlushing) return false;
+	state.engine.prune.awaitingAgentMessage = false;
+	notify(ctx, t(state.config, "tool.prune.started"), "info");
+	await flushPendingPrune(pi, ctx, state);
+	return true;
+}
+
 async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promise<void> {
 	if (state.engine.prune.pendingBatches.length === 0) return;
 	if (state.engine.prune.isFlushing) return;
@@ -240,6 +255,7 @@ async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promis
 
 		let summarized = 0;
 		let skippedOversized = 0;
+		state.engine.prune.impact.lastNoOpToolCalls = 0;
 		const acceptedSummaries: string[] = [];
 		for (let i = 0; i < flushingBatches.length; i++) {
 			const result = results[i];
@@ -300,6 +316,9 @@ async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promis
 			});
 		}
 		if (summarized > 0 || skippedOversized > 0) {
+			const impact = state.engine.prune.impact;
+			impact.noOpToolCalls = (impact.noOpToolCalls ?? 0) + skippedOversized;
+			impact.lastNoOpToolCalls = skippedOversized;
 			let preservedBatches = 0;
 			let preservedToolCalls = 0;
 			state.engine.prune.pendingBatches = state.engine.prune.pendingBatches
@@ -310,7 +329,6 @@ async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promis
 					preservedToolCalls += batch.toolCalls.length;
 					return true;
 				});
-			const impact = state.engine.prune.impact;
 			impact.pendingBatchesPreservedDuringFlush = (impact.pendingBatchesPreservedDuringFlush ?? 0) + preservedBatches;
 			impact.pendingToolCallsPreservedDuringFlush = (impact.pendingToolCallsPreservedDuringFlush ?? 0) + preservedToolCalls;
 			impact.lastPendingBatchesPreservedDuringFlush = preservedBatches;
@@ -325,7 +343,6 @@ async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promis
 				await rebuildPrunedContextFromSession(ctx, state, `${summarized} tool results pruned automatically`, "engine.prune.rebuild.reason.auto");
 				notify(ctx, t("engine.prune.triggered", { count: summarized }), "info");
 			}
-			if (skippedOversized > 0) notify(ctx, t("engine.prune.failed", { error: t("engine.prune.error.skippedOversized", { count: skippedOversized }) }), "warning");
 			persistTelemetry(pi, state);
 		} else {
 			const target = Math.max(1, state.config.pruneBatchSize);

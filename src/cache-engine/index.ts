@@ -2,14 +2,14 @@ import type { RuntimeState } from "../runtime-state.ts";
 import { estimateTurnStart } from "./decision-engine.ts";
 import { maybeInjectCachePrompt } from "./cache-prompt-inject.ts";
 import { checkPrefixStability } from "./prefix-stability.ts";
-import { handleAgentMessagePrune, handleTurnEnd as decideAtTurnEnd, requestFold } from "./auto-compact.ts";
+import { flushAgentMessagePruneFallback, handleAgentMessagePrune, handleTurnEnd as decideAtTurnEnd, requestFold } from "./auto-compact.ts";
 import { handleProviderPrefix } from "./prefix-fingerprint.ts";
 import { handleSessionBeforeCompact as beforeCompact } from "./custom-compaction.ts";
 import { activateAppendOnlyProjectionFromCompact, applyAppendOnlyProjection } from "./append-only-projection.ts";
 import { handleAssistantMessageIntent, handleUserIntent, maybeInjectToolIntentNudge, handleToolCall as toolCall } from "./tool-stability.ts";
 import { rebuildPrunedContext } from "../projection/rebuild.ts";
 import { t } from "../i18n/index.ts";
-export { holdCompaction, requestCompact, requestFold } from "./auto-compact.ts";
+export { flushAgentMessagePruneFallback, holdCompaction, requestCompact, requestFold } from "./auto-compact.ts";
 export { registerFoldTool } from "./fold-tool.ts";
 export { buildContextStatus, canCompactNow, decideCompaction, decisionLabel, estimateTurnStart } from "./decision-engine.ts";
 export { diffPrefix, extractCachePrefix, handleProviderPrefix, normalizeTools, shouldNotifyPrefixDrift, stableHash } from "./prefix-fingerprint.ts";
@@ -80,9 +80,16 @@ export async function handleContext(event: any, ctx: any, state: RuntimeState): 
 	return projection ?? (changed ? { messages: event.messages } : undefined);
 }
 
-export function handleBeforeProviderRequest(event: any, ctx: any, state: RuntimeState): void {
+export async function handleBeforeProviderRequest(event: any, pi: any, ctx: any, state: RuntimeState): Promise<void> {
 	handleProviderPrefix(event, ctx, state);
 	maybeInjectToolIntentNudge(event, ctx, state);
+	const flushed = await flushAgentMessagePruneFallback(pi, ctx, state);
+	if (!flushed) return;
+	const payload = event?.payload ?? event?.body ?? event;
+	if (Array.isArray(payload?.messages)) {
+		const rebuild = rebuildPrunedContext(payload.messages, state);
+		if (rebuild.changed) payload.messages = rebuild.messages;
+	}
 }
 
 export async function handleTurnEnd(event: any, pi: any, ctx: any, state: RuntimeState): Promise<void> {

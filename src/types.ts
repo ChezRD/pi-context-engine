@@ -343,6 +343,8 @@ export interface PruneState {
 		pendingToolCallsPreservedDuringFlush?: number;
 		lastPendingBatchesPreservedDuringFlush?: number;
 		lastPendingToolCallsPreservedDuringFlush?: number;
+		noOpToolCalls?: number;
+		lastNoOpToolCalls?: number;
 		lastPostPruneHitRate?: number;
 		lastPostPruneMissTokens?: number;
 		lastPostPruneMissCost?: number;

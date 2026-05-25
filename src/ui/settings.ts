@@ -34,7 +34,9 @@ class BorderedContainer implements Component {
 interface SettingsState {
 	pruneBatchSize: number;
 	pruneOn: string;
+	pruneAgentMessageFallback: "off" | "before-provider";
 	pruneModel: string;
+	dashboardVerbosity: "compact" | "normal" | "verbose" | "debug";
 	statusBarStyle: "blocks" | "sparkline" | "text";
 	foldThreshold: number;
 	aggressiveFoldThreshold: number;
@@ -97,7 +99,9 @@ export class SettingsComponent implements Component {
 		this.state = {
 			pruneBatchSize: initialState.pruneBatchSize ?? 5,
 			pruneOn: initialState.pruneOn ?? "agent-message",
+			pruneAgentMessageFallback: initialState.pruneAgentMessageFallback ?? "before-provider",
 			pruneModel: initialState.pruneModel ?? "deepseek-v4-flash",
+			dashboardVerbosity: initialState.dashboardVerbosity ?? "normal",
 			statusBarStyle: initialState.statusBarStyle ?? "sparkline",
 			foldThreshold: initialState.foldThreshold ?? 0.75,
 			aggressiveFoldThreshold: initialState.aggressiveFoldThreshold ?? 0.78,
@@ -195,6 +199,8 @@ export class SettingsComponent implements Component {
 		};
 		const intValues = (min: number, max: number) => Array.from({ length: max - min + 1 }, (_, index) => `${min + index}`);
 		const pruneModes = ["agent-message", "checkpoint", "on-demand", "agentic-auto", "every-turn"];
+		const agentMessageFallbackModes = ["before-provider", "off"];
+		const verbosityModes = ["compact", "normal", "verbose", "debug"];
 		const statusStyles = ["blocks", "text", "sparkline"];
 		const localizedOption = (value: string) => t(`ui.settings.value.${value}`);
 		const boolItem = (id: keyof SettingsState, labelKey: string, descriptionKey: string): EngineSettingItem => ({
@@ -230,6 +236,13 @@ export class SettingsComponent implements Component {
 				currentValue: this.displayValue("pruneBatchSize", this.state.pruneBatchSize),
 				values: intValues(1, 20),
 				toStateValue: (value: string) => Number(value),
+			}, {
+				id: "pruneAgentMessageFallback",
+				label: t("ui.settings.pruneAgentMessageFallback"),
+				description: t("ui.settings.pruneAgentMessageFallback.help"),
+				currentValue: this.displayValue("pruneAgentMessageFallback", this.state.pruneAgentMessageFallback),
+				values: agentMessageFallbackModes.map(localizedOption),
+				toStateValue: (value: string) => agentMessageFallbackModes.find((mode) => localizedOption(mode) === value) ?? this.state.pruneAgentMessageFallback,
 			}] satisfies EngineSettingItem[] : []),
 			{
 				id: "pruneModel",
@@ -238,6 +251,14 @@ export class SettingsComponent implements Component {
 				currentValue: this.displayValue("pruneModel", this.state.pruneModel),
 				values: dynamicModels,
 				toStateValue: (value) => value,
+			},
+			{
+				id: "dashboardVerbosity",
+				label: t("ui.settings.dashboardVerbosity"),
+				description: t("ui.settings.dashboardVerbosity.help"),
+				currentValue: this.displayValue("dashboardVerbosity", this.state.dashboardVerbosity),
+				values: verbosityModes.map(localizedOption),
+				toStateValue: (value) => verbosityModes.find((mode) => localizedOption(mode) === value) ?? this.state.dashboardVerbosity,
 			},
 			{
 				id: "statusBarStyle",
@@ -286,7 +307,7 @@ export class SettingsComponent implements Component {
 
 	private displayValue(id: string, value: unknown): string {
 		if (typeof value === "boolean") return value ? t("ui.settings.value.on") : t("ui.settings.value.off");
-		if (id === "statusBarStyle" || id === "pruneOn") return t(`ui.settings.value.${String(value)}`);
+		if (id === "statusBarStyle" || id === "pruneOn" || id === "dashboardVerbosity" || id === "pruneAgentMessageFallback") return t(`ui.settings.value.${String(value)}`);
 		if (id === "foldThreshold" || id === "aggressiveFoldThreshold" || id === "contextForceFoldPct") return `${Math.round(Number(value) * 100)}%`;
 		return String(value);
 	}

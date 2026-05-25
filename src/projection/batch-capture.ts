@@ -52,8 +52,12 @@ function pushPendingBatch(pruneState: { pendingBatches: CapturedBatch[] }, turnI
 	return fresh.length;
 }
 
+function pushAllPendingBatches(pruneState: { pendingBatches: CapturedBatch[] }, batches: CapturedBatch[]): void {
+	for (const batch of batches) pushPendingBatch(pruneState, batch.turnIndex, batch.toolCalls, batch.context);
+}
+
 function toolResultId(result: any): string | undefined {
-	return result?.toolCallId ?? result?.tool_call_id ?? result?.id ?? result?.callId;
+	return result?.toolCallId ?? result?.tool_call_id ?? result?.tool_use_id ?? result?.callId ?? result?.call_id ?? result?.id;
 }
 
 function toolResultText(result: any): string {
@@ -89,21 +93,39 @@ function toolResultText(result: any): string {
 }
 
 export function extractAssistantToolCalls(msg: any): Array<{ id?: string; name?: string; args?: string }> {
-	const raw = Array.isArray(msg?.tool_calls)
-		? msg.tool_calls
-		: Array.isArray(msg?.toolCalls)
-			? msg.toolCalls
-			: Array.isArray(msg?.content)
-				? msg.content.filter((part: any) => part?.type === "toolCall" || part?.type === "tool_use")
-				: [];
+	const raw: any[] = [];
+	if (Array.isArray(msg?.tool_calls)) raw.push(...msg.tool_calls);
+	if (Array.isArray(msg?.toolCalls)) raw.push(...msg.toolCalls);
+	if (msg?.tool_call) raw.push(msg.tool_call);
+	if (msg?.toolCall) raw.push(msg.toolCall);
+	if (Array.isArray(msg?.function_calls)) raw.push(...msg.function_calls);
+	if (Array.isArray(msg?.functionCalls)) raw.push(...msg.functionCalls);
+	if (msg?.function_call) raw.push(msg.function_call);
+	if (msg?.functionCall) raw.push(msg.functionCall);
+	if (Array.isArray(msg?.content)) {
+		raw.push(...msg.content.filter((part: any) =>
+			part?.type === "toolCall"
+			|| part?.type === "tool_call"
+			|| part?.type === "tool_use"
+			|| part?.type === "function_call",
+		));
+	}
+	if (Array.isArray(msg?.output)) {
+		raw.push(...msg.output.filter((part: any) =>
+			part?.type === "toolCall"
+			|| part?.type === "tool_call"
+			|| part?.type === "tool_use"
+			|| part?.type === "function_call",
+		));
+	}
 	return raw.map((tc: any) => {
 		const fn = tc?.function ?? {};
-		const structuredArgs = tc?.arguments ?? tc?.input;
-		const rawId = tc?.id ?? tc?.toolCallId ?? tc?.tool_call_id ?? tc?.callId ?? fn.name ?? tc?.name;
+		const structuredArgs = tc?.arguments ?? tc?.input ?? tc?.args ?? tc?.parameters;
+		const rawId = tc?.id ?? tc?.toolCallId ?? tc?.tool_call_id ?? tc?.tool_use_id ?? tc?.callId ?? tc?.call_id ?? fn.name ?? tc?.name;
 		const rawArgs = fn.arguments ?? structuredArgs;
 		return {
 			id: rawId === undefined ? undefined : String(rawId),
-			name: fn.name ?? tc?.name ?? tc?.toolName ?? "unknown",
+			name: fn.name ?? tc?.name ?? tc?.toolName ?? tc?.tool_name ?? "unknown",
 			args: typeof rawArgs === "string"
 				? rawArgs
 				: rawArgs
@@ -130,8 +152,17 @@ export function captureTurnEndBatch(
 	pruneState: { pendingBatches: CapturedBatch[] },
 	turnIndex: number,
 ): number {
+	if (Array.isArray(event?.messages)) {
+		const before = pendingIds(pruneState.pendingBatches).size;
+		captureBatches(event.messages.map((message: any) => ({ message, turnIndex })), skipIds, { ...pruneState, batchStepCounter: 0 }, turnIndex);
+		return pendingIds(pruneState.pendingBatches).size - before;
+	}
 	const message = event?.message;
-	const results = Array.isArray(event?.toolResults) ? event.toolResults : [];
+	const results = [
+		...(Array.isArray(event?.toolResults) ? event.toolResults : []),
+		...(event?.toolResult ? [event.toolResult] : []),
+		...(event?.result && (event.result?.role === "tool" || event.result?.role === "toolResult" || toolResultId(event.result)) ? [event.result] : []),
+	];
 	if (!hasAssistantToolCalls(message) || results.length === 0) return 0;
 
 	const skip = skipIdSet(skipIds, pruneState.pendingBatches);
@@ -175,6 +206,7 @@ export function captureBatches(
 	const bridgeLength = Math.max(1, options?.bridgeLength ?? DEFAULT_DIALOGUE_GAP_CONTEXT_THRESHOLD);
 	const skip = skipIdSet(skipIds, pruneState.pendingBatches);
 	let currentBatch: CapturedToolCall[] = [];
+	const completedBatches: CapturedBatch[] = [];
 	let batchTurnIndex = turnIndex;
 	let batchContext: string | undefined;
 	let inToolSequence = false;
@@ -195,7 +227,7 @@ export function captureBatches(
 				: localReasoning;
 			if (inToolSequence && dialogueSinceLastTool.length >= bridgeLength) {
 				if (hasNewTools && currentBatch.length > 0) {
-					pushPendingBatch(pruneState, batchTurnIndex, currentBatch, batchContext);
+					completedBatches.push({ turnIndex: batchTurnIndex, context: batchContext, toolCalls: currentBatch });
 				}
 				currentBatch = [];
 				batchContext = undefined;
@@ -228,10 +260,10 @@ export function captureBatches(
 					}
 				}
 			}
-		} else if ((msg.role === "tool" || msg.role === "toolResult") && currentBatch.length > 0) {
-			const tcId = msg.toolCallId ?? msg.tool_call_id;
+		} else if (msg.role === "tool" || msg.role === "toolResult") {
+			const tcId = toolResultId(msg);
 			if (tcId) {
-				const existing = currentBatch.find(t => t.id === tcId);
+				const existing = [...currentBatch, ...completedBatches.flatMap((batch) => batch.toolCalls)].find(t => t.id === tcId);
 				if (existing && !existing.result) {
 					existing.result = toolResultText(msg);
 				}
@@ -244,8 +276,9 @@ export function captureBatches(
 
 	// Flush any pending batch
 	if (inToolSequence && hasNewTools && currentBatch.length > 0) {
-		pushPendingBatch(pruneState, batchTurnIndex, currentBatch, batchContext);
+		completedBatches.push({ turnIndex: batchTurnIndex, context: batchContext, toolCalls: currentBatch });
 	}
+	pushAllPendingBatches(pruneState, completedBatches);
 }
 
 /**

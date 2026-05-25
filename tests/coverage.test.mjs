@@ -372,6 +372,17 @@ describe("captureBatches", () => {
 		], [], pr, 0);
 		assert.equal(pr.pendingBatches.length, 1);
 	});
+	it("keeps delayed parallel tool results across intermediate assistant text", () => {
+		const pr = { pendingBatches: [], batchStepCounter: 0 };
+		m.captureBatches([
+			{ message: { role: "assistant", content: [{ type: "toolCall", id: "tc-1", name: "read", arguments: { path: "a.ts" } }, { type: "toolCall", id: "tc-2", name: "read", arguments: { path: "b.ts" } }] }, turnIndex: 0 },
+			{ message: { role: "toolResult", toolCallId: "tc-1", content: "a" }, turnIndex: 0 },
+			{ message: { role: "assistant", content: "intermediate analysis" }, turnIndex: 0 },
+			{ message: { role: "toolResult", tool_call_id: "tc-2", content: "b" }, turnIndex: 0 },
+		], [], pr, 0);
+		assert.equal(pr.pendingBatches.length, 1);
+		assert.deepEqual(pr.pendingBatches[0].toolCalls.map((tc) => [tc.id, tc.result]), [["tc-1", "a"], ["tc-2", "b"]]);
+	});
 	it("splits multi-turn tool episodes when the dialogue gap reaches bridge length", () => {
 		const pr = { pendingBatches: [], batchStepCounter: 0 };
 		m.captureBatches([
@@ -529,6 +540,16 @@ describe("captureTurnEndBatch", () => {
 		assert.equal(byId["result-prop"], "result field");
 		assert.match(byId["json-fallback"], /"value":123/);
 		assert.equal("missing-result-id" in byId, false);
+	});
+	it("captures turn_end arrays and single toolResult events with alternate ids", () => {
+		const pr = { pendingBatches: [] };
+		const count = m.captureTurnEndBatch({
+			message: { role: "assistant", content: [{ type: "function_call", call_id: "call-1", name: "read", arguments: { path: "a.ts" } }] },
+			toolResult: { call_id: "call-1", content: "single result" },
+		}, [], pr, 4);
+		assert.equal(count, 1);
+		assert.equal(pr.pendingBatches[0].toolCalls[0].id, "call-1");
+		assert.equal(pr.pendingBatches[0].toolCalls[0].result, "single result");
 	});
 
 	it("deduplicates against existing pending batches and skips empty results", () => {
@@ -927,9 +948,9 @@ describe("showDashboard", () => {
 		assert.match(rendered, /Model:\s+deepseek\/deepseek-v4-flash/);
 		assert.match(rendered, /Cache statistics/);
 		assert.match(rendered, /Prune:/);
-		assert.match(rendered, /replacement slice 2k -> 200/);
+		assert.match(rendered, /summary 2k -> 200/);
 		assert.match(rendered, /rebuild 5->3 msgs/);
-		assert.match(rendered, /regret lookup 2 · read 1 · fold-read 3/);
+		assert.doesNotMatch(rendered, /regret lookup 2 · read 1 · fold-read 3/);
 		assert.doesNotMatch(rendered, /x{100,}/);
 	});
 
@@ -1101,9 +1122,10 @@ describe("compact tool renderers", () => {
 		m.registerCompactToolRenderers({ registerTool: (tool) => tools.push(tool) }, store);
 		const read = tools.find((tool) => tool.name === "read");
 		const rendered = read.renderResult({ content: [{ type: "text", text: preview }], details: { elidedBy: "pi-context-engine", ref: record.ref } }, { expanded: false }, theme).text;
-		assert.match(rendered, /large output:/);
-		assert.match(rendered, new RegExp(record.ref));
-		assert.match(rendered, /Full output: context_result_lookup/);
+		assert.doesNotMatch(rendered, /large output:/);
+		assert.doesNotMatch(rendered, new RegExp(record.ref));
+		assert.doesNotMatch(rendered, /Full output: context_result_lookup/);
+		assert.doesNotMatch(rendered, /source read/);
 		assert.doesNotMatch(rendered, /<model_visible_context/);
 	});
 });
@@ -2271,7 +2293,7 @@ describe("auto-compact", () => {
 		assert.equal(state.engine.toolIntent.pending.length, 1);
 
 		const event = { messages: [{ role: "system", content: "base" }, { role: "user", content: "inspect file" }] };
-		m.lifecycleHandleBeforeProviderRequest(event, { session: { id: "session-a" } }, state);
+		await m.lifecycleHandleBeforeProviderRequest(event, {}, { session: { id: "session-a" } }, state);
 
 		assert.equal(event.messages.length, 3);
 		assert.equal(event.messages[2].role, "system");
@@ -2280,9 +2302,53 @@ describe("auto-compact", () => {
 		assert.equal(state.engine.toolIntent.stats.nudges, 1);
 
 		const retry = { messages: [{ role: "system", content: "base" }] };
-		m.lifecycleHandleBeforeProviderRequest(retry, { session: { id: "session-a" } }, state);
+		await m.lifecycleHandleBeforeProviderRequest(retry, {}, { session: { id: "session-a" } }, state);
 		assert.equal(retry.messages.length, 1);
 		assert.equal(state.engine.toolIntent.stats.nudges, 1);
+	});
+
+	it("before_provider_request fallback flushes agent-message prune and rewrites current payload", async () => {
+		const state = makeState();
+		Object.assign(state.config, { pruneOn: "agent-message", pruneAgentMessageFallback: "before-provider", pruneBatchSize: 1 });
+		state.engine.turnIndex = 3;
+		state.engine.prune.batchStepCounter = 1;
+		state.engine.prune.awaitingAgentMessage = true;
+		const toolContent = "export const fallback = true;\n".repeat(80);
+		state.engine.prune.pendingBatches = [{
+			turnIndex: 1,
+			context: "read src/fallback.ts",
+			toolCalls: [{ id: "tc-fallback", name: "read", turnIndex: 1, args: "{\"path\":\"src/fallback.ts\"}", result: toolContent }],
+		}];
+		const messages = [
+			{ role: "system", content: "sys" },
+			{ role: "assistant", tool_calls: [{ id: "tc-fallback", function: { name: "read", arguments: "{\"path\":\"src/fallback.ts\"}" } }] },
+			{ role: "tool", toolCallId: "tc-fallback", content: toolContent },
+		];
+		const branch = messages.map((message, index) => ({ type: "message", id: `m${index}`, turnIndex: index, message }));
+		let completeCalls = 0;
+		const pi = {
+			complete: async () => {
+				completeCalls++;
+				return {
+					content: "{\"summaries\":[{\"batchIndex\":0,\"coverage\":\"complete\",\"summary\":\"Read src/fallback.ts; fallback export confirmed.\"}]}",
+					usage: { input: 100, output: 20, cacheRead: 0 },
+				};
+			},
+		};
+		const event = { payload: { messages: [...messages] } };
+		const notices = [];
+		await m.lifecycleHandleBeforeProviderRequest(event, pi, {
+			sessionManager: { getBranch: async () => branch },
+			ui: { notify: (text, level) => notices.push({ text, level }) },
+		}, state);
+
+		assert.equal(completeCalls, 1);
+		assert.equal(state.engine.prune.awaitingAgentMessage, false);
+		assert.equal(state.engine.prune.pendingBatches.length, 0);
+		assert.ok(state.engine.prune.appliedIds.includes("tc-fallback"));
+		assert.equal(event.payload.messages.some((msg) => msg.role === "tool" && msg.toolCallId === "tc-fallback"), false);
+		assert.ok(event.payload.messages.some((msg) => JSON.stringify(msg).includes("fallback export confirmed")));
+		assert.ok(notices.some((notice) => notice.level === "info"));
 	});
 
 	it("lifecycle handleMessageEnd flushes agent-message prune when event is the assistant message itself", async () => {
@@ -2966,6 +3032,8 @@ describe("status output", () => {
 		state.engine.prune.impact.lastRebuildSavedApproxChars = 1800;
 		state.engine.prune.impact.lastRebuildCheckpointOpened = true;
 		state.engine.prune.impact.lastRebuildReasonKey = "engine.prune.rebuild.reason.auto";
+		state.engine.prune.impact.noOpToolCalls = 3;
+		state.engine.prune.impact.lastNoOpToolCalls = 1;
 		state.engine.prune.impact.lastErrorKey = "engine.prune.error.summaryRequestFailed";
 		return state;
 	}
@@ -2979,10 +3047,11 @@ describe("status output", () => {
 
 		assert.match(status, /Context cache/);
 		assert.match(status, /deepseek\/deepseek-v4-flash/);
-		assert.match(status, /mode agent-message/);
+		assert.match(status, /mode after response batch/);
 		assert.match(status, /progress 1\/2/);
 		assert.match(status, /Prune summary cost: 2 requests/);
 		assert.match(status, /Rebuild: 5 -> 3 messages/);
+		assert.match(status, /No-op coverage: 3 tool calls kept as-is · last 1/);
 		assert.match(status, /summary request failed/);
 		assert.match(status, /abcdef123456/);
 		assert.match(status, /99%/);

@@ -64,6 +64,8 @@ export function rebuildPrunedContext(messages: any[], state: RuntimeState, note?
 	const pruned = state.toolIndexer.getAllSummarized().length > 0 ? pruneMessages(source, state.toolIndexer) : source;
 	const outputChars = estimateMessagesChars(pruned);
 	const newlyApplied = prunableIds.filter((id) => !state.engine.prune.appliedIds.includes(id));
+	const projectedSavedChars = Math.max(0, sourceChars - outputChars);
+	const newlyAppliedSavedChars = newlyApplied.length > 0 ? projectedSavedChars : 0;
 	let checkpointOpened = false;
 
 	if (newlyApplied.length > 0) {
@@ -81,7 +83,7 @@ export function rebuildPrunedContext(messages: any[], state: RuntimeState, note?
 		prunableIds: prunableIds.length,
 		newlyApplied: newlyApplied.length,
 		checkpointOpened,
-		savedApproxChars: Math.max(0, sourceChars - outputChars),
+		savedApproxChars: newlyAppliedSavedChars,
 		reasonKey,
 	});
 
@@ -93,7 +95,7 @@ export function rebuildPrunedContext(messages: any[], state: RuntimeState, note?
 		checkpointOpened,
 		sourceMessages: source.length,
 		outputMessages: pruned.length,
-		savedApproxChars: Math.max(0, sourceChars - outputChars),
+		savedApproxChars: newlyAppliedSavedChars,
 	};
 }
 

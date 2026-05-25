@@ -12,6 +12,12 @@ import { STATUS_KEY } from "./runtime-state.ts";
 import { t } from "./i18n/index.ts";
 import { pruneAdjustedSavings, pruneNegativeImpactCost } from "./projection/prune-impact.ts";
 
+function formatConfigValue(state: RuntimeState, value: string): string {
+	const key = `ui.settings.value.${value}`;
+	const label = t(state.config, key);
+	return label === key ? value : label;
+}
+
 export function setStatus(ctx: any, state: RuntimeState): void {
 	if (!state.config.statusLine || !ctx?.ui?.setStatus) return;
 	if (!state.config.enabled || !isDeepSeekDetectionActive(state.detection)) {
@@ -265,7 +271,7 @@ function formatPruneDetails(state: RuntimeState): string {
 	const target = Math.max(1, state.config.pruneBatchSize);
 	const progress = state.config.pruneEnabled ? `${Math.min(state.engine.prune.batchStepCounter, target)}/${target}` : t(state.config, "status.pruneNext.off");
 	const base = t(state.config, "status.pruneDetails", {
-		mode: state.config.pruneOn,
+		mode: formatConfigValue(state, state.config.pruneOn),
 		done,
 		summarized,
 		applied,
@@ -308,15 +314,21 @@ function formatPruneDetails(state: RuntimeState): string {
 		lastBatches: impact.lastPendingBatchesPreservedDuringFlush ?? 0,
 		lastTools: impact.lastPendingToolCallsPreservedDuringFlush ?? 0,
 	});
+	const noOp = t(state.config, "status.pruneNoOpCoverage", {
+		total: impact.noOpToolCalls ?? 0,
+		last: impact.lastNoOpToolCalls ?? 0,
+	});
+	const rebuildNewlyApplied = impact.lastRebuildNewlyApplied ?? 0;
+	const rebuildSavedApproxChars = rebuildNewlyApplied > 0 ? (impact.lastRebuildSavedApproxChars ?? 0) : 0;
 	const rebuild = impact.lastRebuildSourceMessages === undefined ? "" : `\n  ${t(state.config, "status.pruneRebuildImpact", {
 		source: impact.lastRebuildSourceMessages,
 		output: impact.lastRebuildOutputMessages ?? 0,
 		prunable: impact.lastRebuildPrunableIds ?? 0,
-		applied: impact.lastRebuildNewlyApplied ?? 0,
-		saved: formatTokenCount(impact.lastRebuildSavedApproxChars ?? 0),
+		applied: rebuildNewlyApplied,
+		saved: formatTokenCount(rebuildSavedApproxChars),
 		checkpoint: impact.lastRebuildCheckpointOpened ? t(state.config, "status.yes") : t(state.config, "status.no"),
 		reason: impact.lastRebuildReasonKey ? t(state.config, impact.lastRebuildReasonKey) : t(state.config, "status.notReported"),
 	})}`;
 	const error = impact.lastErrorKey ? `\n  ${t(state.config, "status.pruneError", { error: t(state.config, impact.lastErrorKey) })}` : "";
-	return `${base}\n  ${summary}\n  ${slice}${rebuild}\n  ${miss}\n  ${regret}\n  ${preserved}${error}`;
+	return `${base}\n  ${summary}\n  ${slice}${rebuild}\n  ${miss}\n  ${regret}\n  ${preserved}\n  ${noOp}${error}`;
 }

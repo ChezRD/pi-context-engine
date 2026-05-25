@@ -93,6 +93,7 @@ export function buildPreview(record: StoredResult, config: ExtensionConfig): str
 	const tail = !fullPreviewFits && tailBudget > 0 ? lastLines(record.text.slice(-tailBudget), Math.max(2, Math.floor(MAX_SNIPPET_LINES / 2))) : "";
 	const visibleChars = fullPreviewFits ? record.text.length : head.length + tail.length;
 	const fullResultFitsConfig = record.text.length <= segmentChars;
+	const initialLimit = Math.min(segmentChars, record.text.length);
 	return buildModelVisibleContext({
 		kind: "context_result_truncated",
 		ui: "custom-rendered",
@@ -113,11 +114,11 @@ export function buildPreview(record: StoredResult, config: ExtensionConfig): str
 			ref_label: `[ref ${record.ref}]`,
 			recovery: {
 				tool: CONTEXT_RESULT_LOOKUP_TOOL,
-				arguments: { ref: record.ref, offset: 0, limit: segmentChars },
+				arguments: { ref: record.ref, offset: 0, limit: initialLimit },
 			},
 		},
 		sections: [
-			{ name: "lookup", content: buildContextResultLookupHeader({ ref: record.ref, offset: 0, limit: record.text.length, returnedChars: record.text.length, totalChars: record.text.length, bytes: record.bytes, hasMore: false }) },
+			{ name: "lookup", content: buildContextResultLookupHeader({ ref: record.ref, offset: 0, limit: initialLimit, returnedChars: Math.min(visibleChars, initialLimit), totalChars: record.text.length, bytes: record.bytes, hasMore: !fullResultFitsConfig, nextOffset: fullResultFitsConfig ? undefined : initialLimit }) },
 			{ name: "preview", content: [head, tail ? "\n…\n" : "", tail].join("\n") },
 		],
 	});
@@ -138,11 +139,12 @@ function buildModelInstruction(record: StoredResult, segment: { fullResultFitsCo
 		? `shown excerpt has ${segment.headChars} head chars and ${segment.tailChars} tail chars; about ${omittedChars} chars in the middle are not shown`
 		: `shown excerpt has ${segment.headChars} head chars; about ${omittedChars} chars after it are not shown`;
 	const nextOffset = Math.min(segment.segmentChars, record.text.length);
+	const nextLimit = Math.min(segment.segmentChars, Math.max(0, record.text.length - nextOffset));
 	const remainingSegments = Math.max(0, totalSegments - 1);
 	return [
 		`This is segment 1/${totalSegments} of a ${record.bytes}-byte ${subject}; configured segment size is ${segment.segmentChars} chars.`,
 		`${shape}.`,
-		`Next segment: call ${CONTEXT_RESULT_LOOKUP_TOOL} with ref="${record.ref}", offset=${nextOffset}, limit=${segment.segmentChars}; ${remainingSegments} segment(s) remain.`,
+		`Next segment: call ${CONTEXT_RESULT_LOOKUP_TOOL} with ref="${record.ref}", offset=${nextOffset}, limit=${nextLimit}; ${remainingSegments} segment(s) remain. Never request limit greater than ${segment.segmentChars} or greater than remaining chars.`,
 		"Do not claim facts about unseen ranges until you fetch them; you may also refer to this ref later.",
 	].join(" ");
 }
@@ -161,17 +163,12 @@ export function renderStoredHugeResult(result: any, expanded: boolean, theme: an
 	const record = ref ? store.get(ref) : undefined;
 	const text = record?.text ?? extractModelVisibleSection(textContent, "preview") ?? "";
 	const lines = text.split(/\r?\n/);
-	const source = String(record?.toolName ?? metadata?.source_tool ?? "unknown");
-	const bytes = record ? `${record.bytes} bytes` : "preview";
-	const lookup = ref ? ` ${theme.fg("accent", `[ref ${ref}]`)} ${theme.fg("muted", t("capper.render.source", { source }))}` : "";
-	const header = theme.fg("muted", t("capper.render.largeOutput", { size: bytes })) + lookup;
 	if (!expanded) {
 		const visible = lines.slice(0, 12).join("\n");
-		const recovery = ref ? `\n${theme.fg("muted", t("capper.render.fullOutput", { tool: CONTEXT_RESULT_LOOKUP_TOOL, ref }))}` : "";
 		const more = lines.length > 12 ? `\n${theme.fg("muted", t("capper.render.moreLines", { count: lines.length - 12 }))}` : "";
-		return new Text(`${header}${recovery}\n${theme.fg("toolOutput", visible)}${more}`, 0, 0);
+		return new Text(`${theme.fg("toolOutput", visible)}${more}`, 0, 0);
 	}
-	return new Text(`${header}\n${theme.fg("toolOutput", text)}`, 0, 0);
+	return new Text(theme.fg("toolOutput", text), 0, 0);
 }
 
 function refSlug(toolName: string | undefined): string {
@@ -183,18 +180,11 @@ function refSlug(toolName: string | undefined): string {
 	return slug || "result";
 }
 
-function lookupDisplay(details: { ref?: string; offset?: number; limit?: number; returnedChars?: number; totalChars?: number; bytes?: number; hasMore?: boolean }): string {
-	const ref = details.ref ?? "?";
-	const offset = details.offset ?? 0;
-	const returned = details.returnedChars;
-	const end = returned === undefined ? undefined : offset + returned;
-	const total = details.totalChars;
-	const range = end === undefined ? t("capper.lookup.from", { offset }) : `${offset}-${end}`;
-	const totalText = total === undefined ? "" : ` ${t("capper.lookup.totalChars", { total })}`;
-	const limitText = details.limit === undefined ? "" : ` · ${t("capper.lookup.limit", { limit: details.limit })}`;
-	const sizeText = details.bytes === undefined ? "" : ` · ${t("capper.lookup.bytes", { bytes: details.bytes })}`;
-	const moreText = details.hasMore === undefined ? "" : details.hasMore ? ` · ${t("capper.lookup.moreAvailable")}` : ` · ${t("capper.lookup.end")}`;
-	return `${ref} · ${t("capper.lookup.chars", { range })}${totalText}${limitText}${sizeText}${moreText}`;
+function lookupCallParams(args: { ref?: string; offset?: number; limit?: number }): string {
+	const parts = [`ref=${args.ref ?? "?"}`];
+	if (args.offset !== undefined) parts.push(`offset=${args.offset}`);
+	if (args.limit !== undefined) parts.push(`limit=${args.limit}`);
+	return `[${parts.join(" ")}]`;
 }
 
 function firstLines(text: string, maxLines: number): string {
@@ -229,7 +219,7 @@ export function registerLookupTool(pi: any, store: HugeResultStore): void {
 			return { content: [{ type: "text", text: `${buildContextResultLookupHeader(details)}\n${text}` }], details };
 		},
 		renderCall(args: { ref?: string; offset?: number; limit?: number }, theme: any) {
-			return new Text(theme.fg("toolTitle", theme.bold(CONTEXT_RESULT_LOOKUP_TOOL)) + " " + theme.fg("accent", lookupDisplay({
+			return new Text(theme.fg("toolTitle", theme.bold(CONTEXT_RESULT_LOOKUP_TOOL)) + " " + theme.fg("accent", lookupCallParams({
 				ref: String(args.ref ?? "?"),
 				offset: args.offset,
 				limit: args.limit,
@@ -247,15 +237,6 @@ export function registerLookupTool(pi: any, store: HugeResultStore): void {
 				hasMore: details.hasMore,
 				nextOffset: details.nextOffset,
 			});
-			const display = lookupDisplay({
-				ref: String(details.ref ?? "?"),
-				offset: details.offset,
-				limit: details.limit,
-				returnedChars: details.returnedChars,
-				totalChars: details.totalChars,
-				bytes: details.bytes,
-				hasMore: details.hasMore,
-			});
 			const text = extractToolResultText(result?.content);
 			if (!text) return new Text("", 0, 0);
 			if (!expanded) {
@@ -263,7 +244,7 @@ export function registerLookupTool(pi: any, store: HugeResultStore): void {
 				const lines = payload.split(/\r?\n/);
 				const visible = lines.slice(0, 12).join("\n");
 				const more = lines.length > 12 ? `\n${theme.fg("muted", t("capper.render.moreLines", { count: lines.length - 12 }))}` : "";
-				return new Text(`${theme.fg("muted", display)}\n${theme.fg("toolOutput", visible)}${more}`, 0, 0);
+				return new Text(`${theme.fg("toolOutput", visible)}${more}`, 0, 0);
 			}
 			return new Text(theme.fg("toolOutput", text.replace(header, "").trimStart()), 0, 0);
 		},

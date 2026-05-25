@@ -26,6 +26,8 @@ function impactState(state: RuntimeState): RuntimeState["engine"]["prune"]["impa
 			pendingToolCallsPreservedDuringFlush: 0,
 			lastPendingBatchesPreservedDuringFlush: 0,
 			lastPendingToolCallsPreservedDuringFlush: 0,
+			noOpToolCalls: 0,
+			lastNoOpToolCalls: 0,
 		};
 	}
 	state.engine.prune.impact.postPruneLookupRegret ??= 0;
@@ -35,6 +37,11 @@ function impactState(state: RuntimeState): RuntimeState["engine"]["prune"]["impa
 	state.engine.prune.impact.pendingToolCallsPreservedDuringFlush ??= 0;
 	state.engine.prune.impact.lastPendingBatchesPreservedDuringFlush ??= 0;
 	state.engine.prune.impact.lastPendingToolCallsPreservedDuringFlush ??= 0;
+	state.engine.prune.impact.noOpToolCalls ??= 0;
+	state.engine.prune.impact.lastNoOpToolCalls ??= 0;
+	if ((state.engine.prune.impact.lastRebuildNewlyApplied ?? 0) === 0) {
+		state.engine.prune.impact.lastRebuildSavedApproxChars = 0;
+	}
 	return state.engine.prune.impact;
 }
 
