@@ -37,7 +37,7 @@ type Runtime = {
 type RpivRuntime = { activeLocale?: string };
 type RpivSnapshot = { locale?: string };
 
-const RUNTIME_KEY = Symbol.for("pi-deepseek-cache.i18n.runtime");
+const RUNTIME_KEY = Symbol.for("pi-context-engine.i18n.runtime");
 const RPIV_RUNTIME_KEY = Symbol.for("rpiv-i18n.runtime");
 const RPIV_SNAPSHOT_KEY = Symbol.for("rpiv-i18n");
 

@@ -21,6 +21,14 @@ export interface ExtensionConfig {
 	toolFingerprint: boolean;
 	appendOnlyProjection: boolean;
 	autoCompactAtHighWatermark: boolean;
+	enableAgenticTools: boolean;
+	pruneEnabled: boolean;
+	pruneOn: string;
+	pruneModel: string;
+	pruneIncludeContext: boolean;
+	pruneBatchSize: number;
+	pruneBridgeLength: number;
+	statusBarStyle: "blocks" | "sparkline" | "text";
 	autoFold: boolean;
 	foldTailPct: number;
 	foldSummaryModel: string;
@@ -42,9 +50,27 @@ export interface ExtensionConfig {
 	maxCompactsPerSession: number;
 	statusLine: boolean;
 	persistDiagnostics: boolean;
+	// Semantic fold thresholds
+	foldThreshold: number;
+	aggressiveFoldThreshold: number;
+	exitSummaryThreshold: number;
+	preflightFoldThreshold: number;
+	aggressiveFoldTailPct: number;
+	minFoldSavings: number;
+	foldTimeoutMs: number;
+	semanticFoldMarker: string;
+	checkpointStartsSegment: boolean;
+	// Pin/memory injection
+	skillPinning: boolean;
+	memoryInjection: boolean;
+	priorityInjection: boolean;
+	reasonixCompatibilityRoots: boolean;
+	autoDetectSkillPins: boolean;
+	autoPinFrequentSkills: boolean;
+	skillPinConfirmThreshold: number;
 }
 
-export const CONFIG_BASENAME = "deepseek-cache.json";
+export const CONFIG_BASENAME = "context-engine.json";
 
 export const DEFAULT_CONFIG: ExtensionConfig = {
 	enabled: true,
@@ -52,14 +78,14 @@ export const DEFAULT_CONFIG: ExtensionConfig = {
 	mutateSystemPrompt: false,
 	mutateProviderPayload: false,
 	registerDynamicProvider: false,
-	dynamicProviderName: "deepseek-cache-provider",
+	dynamicProviderName: "context-engine-provider",
 	deepseekBaseUrl: "https://api.deepseek.com",
 	deepseekApiKeyEnv: "DEEPSEEK_API_KEY",
 	allowOverrideBuiltInDeepSeek: false,
 	hugeResultCapper: true,
 	hugeResultChars: 12_000,
-	hugeResultHeadChars: 6_000,
-	hugeResultTailChars: 6_000,
+	hugeResultHeadChars: 1_200,
+	hugeResultTailChars: 400,
 	prefixStabilityCheck: true,
 	prefixFingerprint: true,
 	toolFingerprint: true,
@@ -86,6 +112,30 @@ export const DEFAULT_CONFIG: ExtensionConfig = {
 	maxCompactsPerSession: 6,
 	statusLine: true,
 	persistDiagnostics: false,
+	enableAgenticTools: true,
+	pruneEnabled: true,
+	pruneOn: "agent-message",
+	pruneModel: "deepseek-v4-flash",
+	pruneIncludeContext: true,
+	pruneBatchSize: 5,
+	pruneBridgeLength: 2,
+	statusBarStyle: "sparkline",
+	foldThreshold: 0.75,
+	aggressiveFoldThreshold: 0.78,
+	exitSummaryThreshold: 0.80,
+	preflightFoldThreshold: 0.90,
+	aggressiveFoldTailPct: 0.10,
+	minFoldSavings: 0.30,
+	foldTimeoutMs: 15_000,
+	semanticFoldMarker: "<fold-summary>",
+	checkpointStartsSegment: false,
+	skillPinning: true,
+	memoryInjection: false,
+	priorityInjection: true,
+	reasonixCompatibilityRoots: false,
+	autoDetectSkillPins: true,
+	autoPinFrequentSkills: false,
+	skillPinConfirmThreshold: 2,
 };
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -100,8 +150,18 @@ function str(value: unknown, fallback: string): string {
 	return typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
 }
 
+function pruneMode(value: unknown, fallback: string): string {
+	const normalized = str(value, fallback);
+	return ["every-turn", "checkpoint", "on-demand", "agent-message", "agentic-auto"].includes(normalized) ? normalized : fallback;
+}
+
 function num(value: unknown, fallback: number, min = 0): number {
 	return typeof value === "number" && Number.isFinite(value) && value >= min ? value : fallback;
+}
+
+function intRange(value: unknown, fallback: number, min: number, max: number): number {
+	const n = num(value, fallback, min);
+	return Math.max(min, Math.min(max, Math.round(n)));
 }
 
 function pct(value: unknown, fallback: number): number {
@@ -155,6 +215,30 @@ export function parseConfig(value: unknown): ExtensionConfig {
 		maxCompactsPerSession: num(value.maxCompactsPerSession, DEFAULT_CONFIG.maxCompactsPerSession, 1),
 		statusLine: bool(value.statusLine, DEFAULT_CONFIG.statusLine),
 		persistDiagnostics: bool(value.persistDiagnostics, DEFAULT_CONFIG.persistDiagnostics),
+		enableAgenticTools: bool(value.enableAgenticTools, DEFAULT_CONFIG.enableAgenticTools),
+		pruneEnabled: bool(value.pruneEnabled, DEFAULT_CONFIG.pruneEnabled),
+		pruneOn: pruneMode(value.pruneOn, DEFAULT_CONFIG.pruneOn),
+		pruneModel: str(value.pruneModel, DEFAULT_CONFIG.pruneModel),
+		pruneIncludeContext: bool(value.pruneIncludeContext, DEFAULT_CONFIG.pruneIncludeContext),
+		pruneBatchSize: intRange(value.pruneBatchSize, DEFAULT_CONFIG.pruneBatchSize, 1, 20),
+		pruneBridgeLength: intRange(value.pruneBridgeLength, DEFAULT_CONFIG.pruneBridgeLength, 1, 8),
+		statusBarStyle: (value.statusBarStyle === "blocks" || value.statusBarStyle === "sparkline" || value.statusBarStyle === "text") ? value.statusBarStyle : DEFAULT_CONFIG.statusBarStyle,
+		foldThreshold: pct(value.foldThreshold, DEFAULT_CONFIG.foldThreshold),
+		aggressiveFoldThreshold: pct(value.aggressiveFoldThreshold, DEFAULT_CONFIG.aggressiveFoldThreshold),
+		exitSummaryThreshold: pct(value.exitSummaryThreshold, DEFAULT_CONFIG.exitSummaryThreshold),
+		preflightFoldThreshold: pct(value.preflightFoldThreshold, DEFAULT_CONFIG.preflightFoldThreshold),
+		aggressiveFoldTailPct: pct(value.aggressiveFoldTailPct, DEFAULT_CONFIG.aggressiveFoldTailPct),
+		minFoldSavings: pct(value.minFoldSavings, DEFAULT_CONFIG.minFoldSavings),
+		foldTimeoutMs: num(value.foldTimeoutMs, DEFAULT_CONFIG.foldTimeoutMs, 100),
+		semanticFoldMarker: str(value.semanticFoldMarker, DEFAULT_CONFIG.semanticFoldMarker),
+		checkpointStartsSegment: bool(value.checkpointStartsSegment, DEFAULT_CONFIG.checkpointStartsSegment),
+		skillPinning: bool(value.skillPinning, DEFAULT_CONFIG.skillPinning),
+		memoryInjection: bool(value.memoryInjection, DEFAULT_CONFIG.memoryInjection),
+		priorityInjection: bool(value.priorityInjection, DEFAULT_CONFIG.priorityInjection),
+		reasonixCompatibilityRoots: bool(value.reasonixCompatibilityRoots, DEFAULT_CONFIG.reasonixCompatibilityRoots),
+		autoDetectSkillPins: bool(value.autoDetectSkillPins, DEFAULT_CONFIG.autoDetectSkillPins),
+		autoPinFrequentSkills: bool(value.autoPinFrequentSkills, DEFAULT_CONFIG.autoPinFrequentSkills),
+		skillPinConfirmThreshold: num(value.skillPinConfirmThreshold, DEFAULT_CONFIG.skillPinConfirmThreshold, 1),
 	};
 }
 
@@ -166,7 +250,7 @@ export function readConfig(path = getConfigPath()): ExtensionConfig {
 	try {
 		return parseConfig(JSON.parse(readFileSync(path, "utf-8")));
 	} catch (error) {
-		console.warn(`[pi-deepseek-cache] failed to read config: ${error instanceof Error ? error.message : String(error)}`);
+		console.warn(`[pi-context-engine] failed to read config: ${error instanceof Error ? error.message : String(error)}`);
 		return { ...DEFAULT_CONFIG };
 	}
 }

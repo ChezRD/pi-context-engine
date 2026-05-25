@@ -36,11 +36,11 @@ export function buildDynamicModels(ids: string[]): any[] {
 	}));
 }
 
-export const COMMAND_RESERVED_PROVIDER_NAMES = new Set(["deepseek-cache", "dscache", "deepseek_cache"]);
+export const COMMAND_RESERVED_PROVIDER_NAMES = new Set(["context-engine", "ctxengine", "context_engine"]);
 
 export function effectiveDynamicProviderName(config: ExtensionConfig): string {
 	if (config.allowOverrideBuiltInDeepSeek) return "deepseek";
-	return COMMAND_RESERVED_PROVIDER_NAMES.has(config.dynamicProviderName) ? "deepseek-cache-provider" : config.dynamicProviderName;
+	return COMMAND_RESERVED_PROVIDER_NAMES.has(config.dynamicProviderName) ? "context-engine-provider" : config.dynamicProviderName;
 }
 
 export async function maybeRegisterDynamicProvider(pi: any, config: ExtensionConfig): Promise<string[]> {

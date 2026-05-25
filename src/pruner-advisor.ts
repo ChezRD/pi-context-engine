@@ -28,6 +28,7 @@ export function classifyPruner(config: Partial<PrunerStatus>): Pick<PrunerStatus
 	if (config.enabled === false) return { cacheProfile: "risky", cacheProfileReason: "pruner disabled; context can grow until compaction" };
 	if (config.pruneOn === "every-turn") return { cacheProfile: "bad", cacheProfileReason: "every-turn causes repeated prompt-cache churn" };
 	if (config.pruneOn === "agent-message" && config.batchingMode === "agent-message") return { cacheProfile: "good", cacheProfileReason: "agent-message batching preserves cache stability" };
+	if (config.pruneOn === "checkpoint") return { cacheProfile: "good", cacheProfileReason: "checkpoint pruning runs only at explicit conversation milestones" };
 	if (config.pruneOn === "on-demand") return { cacheProfile: "good", cacheProfileReason: "on-demand pruning keeps user in control of cache resets" };
 	if (config.pruneOn === "agentic-auto") return { cacheProfile: "risky", cacheProfileReason: "agentic-auto depends on model pruning frequency" };
 	return { cacheProfile: "risky", cacheProfileReason: "unknown or non-cache-optimal pruner profile" };

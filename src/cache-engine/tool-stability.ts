@@ -18,7 +18,11 @@ export function detectTextualToolCall(message: any): boolean {
 	const content = typeof message?.content === "string" ? message.content : Array.isArray(message?.content) ? JSON.stringify(message.content) : "";
 	if (!content) return false;
 	if (Array.isArray(message?.toolCalls) && message.toolCalls.length > 0) return false;
-	return /(<tool_use|tool_call|```tool|call\s+(?:the\s+)?tool|function\s*call\s*[:{(])/i.test(content);
+	const withoutCode = content.replace(/```[\s\S]*?```/g, "");
+	if (/```(?:json|typescript|ts|javascript|js)?[\s\S]*?(?:function\s*call|tool_call|context_result_lookup)[\s\S]*?```/i.test(content)) return false;
+	if (/\b(?:example|пример|schema|схем[аы]|parameters|параметр[ыов]?|можно вызывать|смогу вызывать)\b/i.test(withoutCode)) return false;
+	if (/\bcontext_result_lookup\s*\(/i.test(withoutCode) && !/\b(?:call|invoke|run|use|вызови|запусти|используй)\b/i.test(withoutCode)) return false;
+	return /(<tool_use|tool_call|```tool|call\s+(?:the\s+)?tool|function\s*call\s*[:{(])/i.test(withoutCode);
 }
 
 export function handleToolCall(event: any, _ctx: any, state: RuntimeState): any | undefined {

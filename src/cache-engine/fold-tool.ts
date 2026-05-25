@@ -15,7 +15,7 @@ export function registerFoldTool(pi: any, state: RuntimeState): void {
 		async execute(_toolCallId: string, params: { customInstructions?: string }, _signal: AbortSignal, _onUpdate: unknown, ctx: any) {
 			const previous = state.config.autoFold;
 			state.config = { ...state.config, autoFold: true };
-			const result = requestFold(params.customInstructions ? { ...ctx, compact: (options: any) => ctx.compact({ ...options, customInstructions: params.customInstructions }) } : ctx, state);
+			const result = await requestFold(pi, params.customInstructions ? { ...ctx, compact: (options: any) => ctx.compact({ ...options, customInstructions: params.customInstructions }) } : ctx, state);
 			state.config = { ...state.config, autoFold: previous };
 			return { content: [{ type: "text", text: result.ok ? t("tool.fold.triggered") : t("tool.fold.failed", { error: result.error }) }], details: { ok: result.ok } };
 		},

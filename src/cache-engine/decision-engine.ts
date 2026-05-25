@@ -75,3 +75,70 @@ export function canCompactNow(state: RuntimeState): boolean {
 export function decisionLabel(action: CacheDecisionAction): string {
 	return t(`engine.decision.${action}`);
 }
+
+// --- Post-usage decision engine (Reasonix-style) ---
+
+export type PostUsageDecisionKind = "none" | "fold" | "exit-with-summary";
+
+export interface PostUsageDecision {
+	kind: PostUsageDecisionKind;
+	promptTokens: number;
+	ctxMax: number;
+	ratio: number;
+	tailBudget?: number;
+	aggressive?: boolean;
+}
+
+/**
+ * Three-tier decision engine based on Reasonix context-manager.ts.
+ * Called after each turn completes, using prompt token usage.
+ */
+export function decideAfterUsage(
+	promptTokens: number | undefined,
+	ctxMax: number | undefined,
+	alreadyFoldedThisTurn: boolean,
+	config: ExtensionConfig,
+): PostUsageDecision {
+	const max = ctxMax ?? 0;
+	const tokens = promptTokens ?? 0;
+	if (max <= 0) return { kind: "none", promptTokens: tokens, ctxMax: max, ratio: 0 };
+
+	const ratio = tokens / max;
+
+	// Already folded this turn → nothing to do
+	if (alreadyFoldedThisTurn) return { kind: "none", promptTokens: tokens, ctxMax: max, ratio };
+
+	// Force-exit with summary (>80%)
+	if (ratio >= config.exitSummaryThreshold) {
+		return { kind: "exit-with-summary", promptTokens: tokens, ctxMax: max, ratio };
+	}
+
+	// Aggressive fold (>78%)
+	if (ratio >= config.aggressiveFoldThreshold) {
+		return { kind: "fold", promptTokens: tokens, ctxMax: max, ratio, tailBudget: config.aggressiveFoldTailPct, aggressive: true };
+	}
+
+	// Normal fold (>75%)
+	if (ratio >= config.foldThreshold) {
+		return { kind: "fold", promptTokens: tokens, ctxMax: max, ratio, tailBudget: config.foldTailPct, aggressive: false };
+	}
+
+	// Below threshold
+	return { kind: "none", promptTokens: tokens, ctxMax: max, ratio };
+}
+
+/**
+ * Pre-flight estimate at turn start.
+ * If context > 90%, trigger a fold before the turn begins.
+ */
+export function estimateTurnStart(
+	ctx: any,
+	config: ExtensionConfig,
+): { shouldFold: boolean; ratio: number } {
+	const usage = readContextUsage(ctx);
+	const ratio = usage.ratio ?? 0;
+	return {
+		shouldFold: ratio >= config.preflightFoldThreshold,
+		ratio,
+	};
+}

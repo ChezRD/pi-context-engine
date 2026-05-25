@@ -6,12 +6,15 @@ import { emptyStats } from "./stats.ts";
 import { formatPayloadDiagnostics } from "./payload-diagnostics.ts";
 import type { HugeResultStore } from "./capper.ts";
 import { registerLookupTool } from "./capper.ts";
-import { buildDetailedStatus, buildStatus, setStatus } from "./status.ts";
+import { buildDetailedStatus, buildStatus, formatPruneSummarizerTrace, setStatus } from "./status.ts";
 import type { RuntimeState } from "./runtime-state.ts";
 import { holdCompaction, requestCompact, requestFold } from "./cache-engine/index.ts";
+import { openCacheCheckpoint } from "./cache-engine/cache-checkpoints.ts";
+import { openSettingsMenu } from "./ui/settings.ts";
 import { t } from "./i18n/index.ts";
+import { syncPruneToolActivation } from "./projection/prune-tool.ts";
 
-export const COMMAND = "deepseek-cache";
+export const COMMAND = "context-engine";
 
 const SUBCOMMANDS = [
 	{ value: "status", label: "status", descriptionKey: "cmd.status.description" },
@@ -58,20 +61,21 @@ async function executeSubcommand(pi: any, getCtx: () => any, state: RuntimeState
 	state.config = readConfig();
 	state.detection = detectDeepSeekModel(ctx?.model);
 	state.contextPct = await readContextPercent(ctx);
-	const result = runSubcommand(pi, ctx, state, store, parts[0] ?? "status", parts.slice(1));
+	const result = await runSubcommand(pi, ctx, state, store, parts[0] ?? "status", parts.slice(1));
 	notifyCommand(ctx, result.text, result.level);
 	return result.text;
 }
 
-function runSubcommand(pi: any, ctx: any, state: RuntimeState, store: HugeResultStore, sub: string, args: string[]): CommandResult {
+async function runSubcommand(pi: any, ctx: any, state: RuntimeState, store: HugeResultStore, sub: string, args: string[]): Promise<CommandResult> {
 	switch (sub) {
 		case "status": return { text: buildStatus(pi, state), level: "info" };
 		case "diagnose": return { text: buildDiagnose(pi, state), level: "info" };
-		case "fold": return foldNow(ctx, state);
+		case "fold": return await foldNow(pi, ctx, state);
 		case "compact": return compactNow(ctx, state);
 		case "hold": return holdNow(state);
-		case "config": return { text: buildConfig(pi, state), level: "info" };
+		case "config": return await configNow(pi, ctx, state);
 		case "reset-stats":
+			openCacheCheckpoint(state, "manual_reset", { startSegment: true });
 			state.stats = emptyStats();
 			setStatus(ctx, state);
 			return { text: t(state.config, "cmd.resetStats.done"), level: "info" };
@@ -82,8 +86,23 @@ function runSubcommand(pi: any, ctx: any, state: RuntimeState, store: HugeResult
 	}
 }
 
+async function configNow(pi: any, ctx: any, state: RuntimeState): Promise<CommandResult> {
+	const newConfig = await openSettingsMenu(pi, ctx, state.config);
+	if (!newConfig) {
+		return { text: t(state.config, "cmd.config.cancelled") ?? "Config edit cancelled.", level: "info" };
+	}
+	
+	// Merge and save
+	Object.assign(state.config, newConfig);
+	writeConfig(state.config);
+	syncPruneToolActivation(pi, state.config);
+	setStatus(ctx, state);
+	
+	return { text: t(state.config, "cmd.config.saved") ?? "Configuration saved successfully.", level: "info" };
+}
+
 function buildDiagnose(pi: any, state: RuntimeState): string {
-	return [buildDetailedStatus(pi, state), "", formatPayloadDiagnostics(state.lastPayload, state.config)].join("\n");
+	return [buildDetailedStatus(pi, state), "", formatPayloadDiagnostics(state.lastPayload, state.config), "", formatPruneSummarizerTrace(state)].join("\n");
 }
 
 export function ensureLookupTool(pi: any, store: HugeResultStore, state: RuntimeState): void {
@@ -92,8 +111,8 @@ export function ensureLookupTool(pi: any, store: HugeResultStore, state: Runtime
 	state.lookupRegistered = true;
 }
 
-function foldNow(ctx: any, state: RuntimeState): CommandResult {
-	const result = requestFold(ctx, state);
+async function foldNow(pi: any, ctx: any, state: RuntimeState): Promise<CommandResult> {
+	const result = await requestFold(pi, ctx, state);
 	return result.ok ? { text: t(state.config, "cmd.fold.done"), level: "info" } : { text: t(state.config, "cmd.failed", { error: result.error }), level: "error" };
 }
 

@@ -4,10 +4,13 @@ import { detectPruner } from "./pruner-advisor.ts";
 import { getConfigPath } from "./config.ts";
 import { formatRatio, formatTokenCount, hitRatio, sessionHitRateAfterWarmup } from "./stats.ts";
 import { buildContextStatus, decisionLabel } from "./cache-engine/index.ts";
+import { buildProgressBar } from "./utils.ts";
+import { formatPrefixReason } from "./prefix-reasons.ts";
 import type { CacheDecisionAction } from "./cache-engine/decision-engine.ts";
 import type { RuntimeState } from "./runtime-state.ts";
 import { STATUS_KEY } from "./runtime-state.ts";
 import { t } from "./i18n/index.ts";
+import { pruneAdjustedSavings, pruneNegativeImpactCost } from "./projection/prune-impact.ts";
 
 export function setStatus(ctx: any, state: RuntimeState): void {
 	if (!state.config.statusLine || !ctx?.ui?.setStatus) return;
@@ -22,14 +25,46 @@ export function setStatus(ctx: any, state: RuntimeState): void {
 
 function formatStatusLine(ctxArg: any, state: RuntimeState): string {
 	const status = buildContextStatus(ctxArg ?? { getContextUsage: () => ({ ratio: state.contextPct }) }, state.stats, state.config);
-	const emoji = status.zone === "critical" ? "🌧" : status.zone === "red" ? "🌥" : status.zone === "orange" ? "⛅" : status.zone === "yellow" ? "🌤" : "☀";
-	const hit = formatRatio(hitRatio(state.stats.input, state.stats.cacheRead, state.stats.cacheWrite));
-	const ratio = status.ratio ?? state.contextPct;
-	const ctx = ratio === undefined ? t(state.config, "status.ctxUnavailable") : t(state.config, "status.ctxPct", { pct: Math.round(ratio * 100) });
+	const hit = hitRatio(state.stats.input, state.stats.cacheRead, state.stats.cacheWrite) ?? 0;
+	const bar = buildProgressBar(hit, 10, state.config.statusBarStyle as any);
+	const hitText = formatRatio(hit);
 	const turns = state.config.showTurnEstimate && status.zone !== "green" && status.turnsToOverflow !== undefined ? t(state.config, "status.turns", { turns: status.turnsToOverflow }) : "";
-	const savings = state.config.showCostSavings && state.stats.savings > 0 ? ` · $${state.stats.savings.toFixed(2)}` : "";
-	const prefix = state.engine.prefixDriftCount > 0 ? t(state.config, "status.prefixDrift", { count: state.engine.prefixDriftCount }) : t(state.config, "status.prefixOk");
-	return t(state.config, "status.line", { emoji, ctx, hit, turns, savings, prefix, decision: decisionLabel(status.decision) });
+	const adjustedSavings = pruneAdjustedSavings(state);
+	const savings = adjustedSavings < 0 ? `-$${Math.abs(adjustedSavings).toFixed(2)}` : `$${adjustedSavings.toFixed(2)}`;
+	const reason = state.engine.lastPrefixChangeReason ? `:${formatPrefixReason(state.config, state.engine.lastPrefixChangeReason, "compact")}` : "";
+	const prefix = state.engine.prefixDriftCount > 0 ? ` · ${t(state.config, "status.prefixDrift", { count: state.engine.prefixDriftCount })}${reason}` : "";
+	const decision = status.decision === "hold" ? "" : ` · ${decisionLabel(status.decision)}`;
+	const prune = formatPruneStatusBar(state);
+	return t(state.config, "status.line", { bar: bar ? `${bar} ` : "", hit: hitText, savings, turns, prune, prefix, decision });
+}
+
+function pendingPruneToolCalls(state: RuntimeState): number {
+	return state.engine.prune.pendingBatches.reduce((sum, batch) => sum + batch.toolCalls.length, 0);
+}
+
+function formatSavings(value: number): string {
+	if (!Number.isFinite(value)) return "$0.000000";
+	return value < 0 ? `-$${Math.abs(value).toFixed(6)}` : `$${value.toFixed(6)}`;
+}
+
+function formatPruneNext(state: RuntimeState): string {
+	if (!state.config.pruneEnabled) return t(state.config, "status.pruneNext.off");
+	const mode = state.config.pruneOn;
+	if (mode === "every-turn") return t(state.config, "status.pruneNext.everyTurn");
+	if (mode === "checkpoint") return t(state.config, "status.pruneNext.checkpoint");
+	if (mode === "on-demand") return t(state.config, "status.pruneNext.manual");
+	const target = Math.max(1, state.config.pruneBatchSize);
+	const current = Math.min(state.engine.prune.batchStepCounter, target);
+	if (current >= target && pendingPruneToolCalls(state) > 0) return t(state.config, "status.pruneNext.now");
+	const remaining = Math.max(0, target - current);
+	return t(state.config, "status.pruneNext.turns", { turns: remaining });
+}
+
+function formatPruneStatusBar(state: RuntimeState): string {
+	const done = state.engine.prune.pruneRunCount;
+	const next = formatPruneNext(state);
+	if (!state.config.pruneEnabled && done === 0) return "";
+	return ` · ${t(state.config, "status.pruneLine", { done, next })}`;
 }
 
 export function buildStatus(pi: any, state: RuntimeState): string {
@@ -38,8 +73,11 @@ export function buildStatus(pi: any, state: RuntimeState): string {
 		`  ${t(state.config, "status.model")}: ${formatModelLine(state)}`,
 		`  ${t(state.config, "status.cache")}: ${formatCacheLine(state)}`,
 		`  ${t(state.config, "status.context")}: ${formatContextLine(state)}`,
-		`  Engine: prefix changes ${state.engine.prefixDriftCount} · history rewrites ${state.engine.historyRewriteCount} · ${formatDecision(state)}`,
-		`  ${t(state.config, "status.hashLine", { prefixHash: state.engine.prefixHash?.slice(0, 12) ?? t(state.config, "status.unknown"), toolHash: state.engine.toolHash?.slice(0, 12) ?? t(state.config, "status.unknown"), tools: state.engine.toolHashChanges, reason: state.engine.lastPrefixChangeReason ?? t(state.config, "status.notReported") })}`,
+		`  ${formatPruneDetails(state)}`,
+		`  ${t(state.config, "status.checkpointLine", { checkpoints: state.engine.checkpoints.length, segments: state.engine.segments.length })}`,
+		`  ${t(state.config, "status.pins", { count: state.pinStore.count, hash: state.pinStore.combinedHash.slice(0, 8) })}`,
+		`  ${t(state.config, "status.engineLine", { prefixDrifts: state.engine.prefixDriftCount, rewrites: state.engine.historyRewriteCount, decision: formatDecision(state) })}`,
+		`  ${t(state.config, "status.hashLine", { prefixHash: state.engine.prefixHash?.slice(0, 12) ?? t(state.config, "status.unknown"), toolHash: state.engine.toolHash?.slice(0, 12) ?? t(state.config, "status.unknown"), tools: state.engine.toolHashChanges, reason: state.engine.lastPrefixChangeReason ? formatPrefixReason(state.config, state.engine.lastPrefixChangeReason, "detail") : t(state.config, "status.notReported") })}`,
 		`  ${t(state.config, "status.prefixNotification", { turn: state.engine.lastPrefixWarningTurn ?? t(state.config, "status.notReported"), suppressed: state.engine.lastPrefixNotificationSuppressed ? t(state.config, "status.yes") : t(state.config, "status.no") })}`,
 		`  ${t(state.config, "status.projectionLine", { active: state.engine.appendOnly.projectionActive ? t(state.config, "status.enabled") : t(state.config, "status.disabled"), tail: state.engine.appendOnly.tailStartEntryId ?? t(state.config, "status.notReported"), reason: state.engine.appendOnly.invalidatedReason ?? t(state.config, "status.notReported") })}`,
 		`  ${formatEligibility(pi, state)}`,
@@ -56,14 +94,57 @@ export function buildDetailedStatus(pi: any, state: RuntimeState): string {
 		"",
 		formatContextDetails(state),
 		"",
+		formatCheckpointHistory(state),
+		"",
 		formatConfigDetails(pi, state),
 	].join("\n");
+}
+
+export function formatPruneSummarizerTrace(state: RuntimeState): string {
+	const impact = state.engine.prune.impact;
+	if (!state.config.diagnostics || !impact?.lastSummarizePrompt) return "Last prune summarizer trace\n  not captured";
+	const accepted = impact.lastAcceptedSummaries?.length
+		? impact.lastAcceptedSummaries.map((summary, index) => `  [${index + 1}] ${summary}`).join("\n")
+		: "  none";
+	return [
+		"Last prune summarizer trace",
+		`  maxTokens: ${impact.lastSummarizeMaxTokens ?? "n/a"}`,
+		"  prompt:",
+		indentBlock(impact.lastSummarizePrompt, "    "),
+		"  raw response:",
+		indentBlock(impact.lastSummarizeResponse ?? "n/a", "    "),
+		"  accepted summaries:",
+		accepted,
+	].join("\n");
+}
+
+function indentBlock(text: string, indent: string): string {
+	return text.split("\n").map((line) => indent + line).join("\n");
+}
+
+function formatCheckpointHistory(state: RuntimeState): string {
+	const cps = state.engine.checkpoints;
+	const segments = state.engine.segments;
+	const lines = [t(state.config, "status.checkpointHistory")];
+	if (!cps.length) {
+		lines.push(`  ${t(state.config, "status.notReported")}`);
+		return lines.join("\n");
+	}
+	for (let i = 0; i < cps.length; i++) {
+		const cp = cps[i];
+		const seg = segments.find((s) => s.checkpointId === cp.id);
+		const label = cp.conversationLabel ? ` "${cp.conversationLabel}"` : "";
+		const modelChange = cp.previousModelId && cp.modelId && cp.previousModelId !== cp.modelId ? ` ${cp.previousModelId} → ${cp.modelId}` : cp.modelId ? ` ${cp.modelId}` : "";
+		const warmup = seg && seg.warmupRequests > 0 ? ` · ${t(state.config, "status.warmupRequests", { count: seg.warmupRequests })}` : "";
+		lines.push(`  #${i + 1} ${cp.reason}${label} @${cp.turn}${modelChange}${warmup}`);
+	}
+	return lines.join("\n");
 }
 
 function formatCompactionHistory(state: RuntimeState): string {
 	const records = state.stats.compacts ?? [];
 	if (!records.length) return t(state.config, "status.compactionHistory", { history: t(state.config, "status.notReported") });
-	const history = records.slice(-3).map((record) => `${record.reason}@${record.turn}:${record.completed ? "completed" : "failed"}`).join(", ");
+	const history = records.slice(-3).map((record) => `${record.reason}@${record.turn}:${record.completed ? t(state.config, "status.completed") : t(state.config, "status.failed")}`).join(", ");
 	return t(state.config, "status.compactionHistory", { history });
 }
 
@@ -71,7 +152,7 @@ function formatEligibility(pi: any, state: RuntimeState): string {
 	const pruner = detectPruner(pi);
 	const compactStorm = state.engine.compactCount > state.config.maxCompactsPerSession;
 	const blockers: string[] = [];
-	if (state.engine.prefixDriftCount > 0) blockers.push(t(state.config, "status.blockerPrefix", { count: state.engine.prefixDriftCount, reason: state.engine.lastPrefixChangeReason ?? t(state.config, "status.unknown") }));
+	if (state.engine.prefixDriftCount > 0) blockers.push(t(state.config, "status.blockerPrefix", { count: state.engine.prefixDriftCount, reason: formatPrefixReason(state.config, state.engine.lastPrefixChangeReason, "compact") }));
 	if (state.engine.toolHashChanges > 0) blockers.push(t(state.config, "status.blockerTools", { count: state.engine.toolHashChanges }));
 	if (pruner.cacheProfile === "bad") blockers.push(t(state.config, "status.blockerPruner", { reason: pruner.cacheProfileReason }));
 	if (compactStorm) blockers.push(t(state.config, "status.blockerStorm"));
@@ -84,8 +165,8 @@ function formatEligibility(pi: any, state: RuntimeState): string {
 
 function formatDecision(state: RuntimeState): string {
 	const decision = state.engine.lastDecision;
-	const safe: CacheDecisionAction = decision === "advise" || decision === "fold" || decision === "force_fold" || decision === "hold" ? decision : "hold";
-	return decisionLabel(safe);
+	if (decision === "hold" || !decision) return "";
+	return decisionLabel(decision as CacheDecisionAction);
 }
 
 function formatModelLine(state: RuntimeState): string {
@@ -143,7 +224,7 @@ function formatCacheDetails(state: RuntimeState): string {
 		`  ${t(state.config, "status.output", { tokens: formatTokenCount(state.stats.output) })}`,
 		`  ${t(state.config, "status.estimatedCost", { cost: state.stats.cost ? `$${state.stats.cost.toFixed(6)}` : t(state.config, "status.notReported") })}`,
 		`  ${t(state.config, "status.requestsSinceCompaction", { requests: state.stats.sinceCompactionRequests })}`,
-		`  ${t(state.config, "status.cacheSavings", { savings: state.stats.savings ? `$${state.stats.savings.toFixed(6)}` : t(state.config, "status.notReported") })}`,
+		`  ${t(state.config, "status.cacheSavings", { savings: formatSavings(pruneAdjustedSavings(state)), gross: formatSavings(state.stats.savings), impact: formatSavings(pruneNegativeImpactCost(state)) })}`,
 	].join("\n");
 }
 
@@ -160,11 +241,61 @@ function formatConfigDetails(pi: any, state: RuntimeState): string {
 		`  ${t(state.config, "status.extension", { state: state.config.enabled ? t(state.config, "status.enabled") : t(state.config, "status.disabled") })}`,
 		`  ${t(state.config, "status.capper", { state: state.config.hugeResultCapper ? t(state.config, "status.enabled") : t(state.config, "status.disabled") })}`,
 		`  ${t(state.config, "status.dynamicProvider", { state: state.config.registerDynamicProvider ? `${t(state.config, "status.enabled")} (${state.dynamicModels.length ? state.dynamicModels.join(", ") : t(state.config, "status.noModelsLoaded")})` : t(state.config, "status.disabled") })}`,
-		`  Engine: prefix changes ${state.engine.prefixDriftCount} · history rewrites ${state.engine.historyRewriteCount} · ${formatDecision(state)}`,
-		`  ${t(state.config, "status.hashLine", { prefixHash: state.engine.prefixHash?.slice(0, 12) ?? t(state.config, "status.unknown"), toolHash: state.engine.toolHash?.slice(0, 12) ?? t(state.config, "status.unknown"), tools: state.engine.toolHashChanges, reason: state.engine.lastPrefixChangeReason ?? t(state.config, "status.notReported") })}`,
+		`  ${formatPruneDetails(state)}`,
+		`  ${t(state.config, "status.checkpointLine", { checkpoints: state.engine.checkpoints.length, segments: state.engine.segments.length })}`,
+		`  ${t(state.config, "status.pins", { count: state.pinStore.count, hash: state.pinStore.combinedHash.slice(0, 8) })}`,
+		`  ${t(state.config, "status.engineLine", { prefixDrifts: state.engine.prefixDriftCount, rewrites: state.engine.historyRewriteCount, decision: formatDecision(state) })}`,
+		`  ${t(state.config, "status.hashLine", { prefixHash: state.engine.prefixHash?.slice(0, 12) ?? t(state.config, "status.unknown"), toolHash: state.engine.toolHash?.slice(0, 12) ?? t(state.config, "status.unknown"), tools: state.engine.toolHashChanges, reason: state.engine.lastPrefixChangeReason ? formatPrefixReason(state.config, state.engine.lastPrefixChangeReason, "detail") : t(state.config, "status.notReported") })}`,
 		`  ${t(state.config, "status.prefixNotification", { turn: state.engine.lastPrefixWarningTurn ?? t(state.config, "status.notReported"), suppressed: state.engine.lastPrefixNotificationSuppressed ? t(state.config, "status.yes") : t(state.config, "status.no") })}`,
 		`  ${t(state.config, "status.projectionLine", { active: state.engine.appendOnly.projectionActive ? t(state.config, "status.enabled") : t(state.config, "status.disabled"), tail: state.engine.appendOnly.tailStartEntryId ?? t(state.config, "status.notReported"), reason: state.engine.appendOnly.invalidatedReason ?? t(state.config, "status.notReported") })}`,
 		`  ${formatEligibility(pi, state)}`,
 		`  ${formatCompactionHistory(state)}`,
 	].join("\n");
+}
+
+function formatPruneDetails(state: RuntimeState): string {
+	const done = state.engine.prune.pruneRunCount;
+	const summarized = state.engine.prune.summarizedIds.length;
+	const applied = state.engine.prune.appliedIds.length;
+	const unapplied = Math.max(0, summarized - applied);
+	const pending = pendingPruneToolCalls(state);
+	const batches = state.engine.prune.pendingBatches.length;
+	const impact = state.engine.prune.impact;
+	const target = Math.max(1, state.config.pruneBatchSize);
+	const progress = state.config.pruneEnabled ? `${Math.min(state.engine.prune.batchStepCounter, target)}/${target}` : t(state.config, "status.pruneNext.off");
+	const base = t(state.config, "status.pruneDetails", {
+		mode: state.config.pruneOn,
+		done,
+		summarized,
+		applied,
+		unapplied,
+		pending,
+		batches,
+		next: formatPruneNext(state),
+		progress,
+	});
+	if (!impact) return base;
+	const summary = t(state.config, "status.pruneSummaryImpact", {
+		requests: impact.summarizeRequests,
+		tokens: formatTokenCount(impact.summarizeInputTokens + impact.summarizeOutputTokens),
+		cost: impact.summarizeCost.toFixed(4),
+		last: (impact.lastSummarizeCost ?? 0).toFixed(4),
+	});
+	const slice = t(state.config, "status.pruneSliceImpact", {
+		raw: formatTokenCount(impact.summarizeRawChars ?? 0),
+		summary: formatTokenCount(impact.summarizeSummaryChars ?? 0),
+		delta: formatTokenCount(Math.max(0, (impact.summarizeRawChars ?? 0) - (impact.summarizeSummaryChars ?? 0))),
+		lastRaw: formatTokenCount(impact.lastSummarizeRawChars ?? 0),
+		lastSummary: formatTokenCount(impact.lastSummarizeSummaryChars ?? 0),
+	});
+	const miss = t(state.config, "status.pruneMissImpact", {
+		requests: impact.postPruneRequests,
+		miss: formatTokenCount(impact.postPruneMissTokens),
+		cache: formatTokenCount(impact.postPruneCacheReadTokens),
+		cost: impact.postPruneMissCost.toFixed(4),
+		last: (impact.lastPostPruneMissCost ?? 0).toFixed(4),
+		hit: impact.lastPostPruneHitRate === undefined ? "n/a" : formatRatio(impact.lastPostPruneHitRate),
+	});
+	const error = impact.lastError ? `\n  ${t(state.config, "status.pruneError", { error: impact.lastError })}` : "";
+	return `${base}\n  ${summary}\n  ${slice}\n  ${miss}${error}`;
 }

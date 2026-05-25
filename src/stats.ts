@@ -1,15 +1,44 @@
-import type { CacheStats, UsageSnapshot } from "./types.ts";
+import type { CacheStats, UsageSnapshot, ModelCost } from "./types.ts";
+import type { RuntimeState } from "./runtime-state.ts";
 
-export interface ModelCost {
-	input?: number;
-	cacheRead?: number;
-	cacheWrite?: number;
-	output?: number;
+export type { ModelCost } from "./types.ts";
+
+export interface ModelUsageSummary {
+	modelId: string;
+	provider?: string;
+	requests: number;
+	input: number;
+	cacheRead: number;
+	cacheWrite: number;
+	output: number;
+	hitRate?: number;
+	actualCost: number;
+	noCacheCost?: number;
+	savings?: number;
+	pricingKnown: boolean;
+}
+
+export interface SegmentUsageSummary {
+	segmentId: string;
+	checkpointId?: string;
+	checkpointReason?: string;
+	modelId?: string;
+	requests: number;
+	warmupRequests: number;
+	input: number;
+	cacheRead: number;
+	cacheWrite: number;
+	output: number;
+	hitRate?: number;
+	warmHitRate?: number;
+	actualCost: number;
+	noCacheCost?: number;
+	savings?: number;
 }
 
 export const DEEPSEEK_OFFICIAL_PRICING_2026_05: Record<"flash" | "pro", Required<ModelCost>> = {
 	// Source: https://api-docs.deepseek.com/quick_start/pricing/
-	// Units: USD per 1M tokens. Cache write is not priced separately by DeepSeek API/Pi model metadata.
+	// Units: USD per 1M tokens. Cache write is not priced separately by DeepSeek API.
 	flash: { input: 0.14, cacheRead: 0.0028, cacheWrite: 0, output: 0.28 },
 	pro: { input: 0.435, cacheRead: 0.003625, cacheWrite: 0, output: 0.87 },
 };
@@ -33,6 +62,10 @@ function readCostTotal(cost: unknown): number | undefined {
 	if (typeof cost === "number" && Number.isFinite(cost)) return cost;
 	if (cost && typeof cost === "object" && typeof (cost as any).total === "number") return (cost as any).total;
 	return undefined;
+}
+
+function resolveModelCost(modelId: string | undefined, modelCost: ModelCost | undefined): ModelCost | undefined {
+	return deepSeekOfficialCost(modelId) ?? modelCost;
 }
 
 export function usageTotalInput(usage: { input?: number; cacheRead?: number; cacheWrite?: number } | undefined): number {
@@ -64,9 +97,7 @@ export function extractUsageSnapshot(messageOrUsage: any): UsageSnapshot | undef
 
 export function savingsFromRealCost(usage: { input?: number; cacheRead?: number; cacheWrite?: number; output?: number; cost?: number } | undefined, modelCost: ModelCost | undefined): number {
 	if (!usage || !modelCost || typeof modelCost.input !== "number" || typeof modelCost.output !== "number" || typeof usage.cost !== "number") return 0;
-	const totalInput = usageTotalInput(usage);
-	const noCacheCost = totalInput * modelCost.input / 1_000_000 + readNumber(usage.output) * modelCost.output / 1_000_000;
-	return Math.max(0, noCacheCost - usage.cost);
+	return Math.max(0, noCacheCostUsd(usage, modelCost) - usage.cost);
 }
 
 export function cacheSavingsUsdFromCost(modelCost: ModelCost | undefined, cacheReadTokens: number): number {
@@ -74,9 +105,25 @@ export function cacheSavingsUsdFromCost(modelCost: ModelCost | undefined, cacheR
 	return Math.max(0, cacheReadTokens * (modelCost.input - modelCost.cacheRead) / 1_000_000);
 }
 
+export function noCacheCostUsd(usage: { input?: number; cacheRead?: number; cacheWrite?: number; output?: number } | undefined, modelCost: ModelCost | undefined): number {
+	if (!usage || !modelCost || typeof modelCost.input !== "number" || typeof modelCost.output !== "number") return 0;
+	const totalInput = usageTotalInput(usage);
+	return totalInput * modelCost.input / 1_000_000 + readNumber(usage.output) * modelCost.output / 1_000_000;
+}
+
 export function cacheSavingsUsd(modelId: string | undefined, hitTokens: number): number {
 	const pricing = deepSeekOfficialCost(modelId);
 	return pricing ? hitTokens * (pricing.input - pricing.cacheRead) / 1_000_000 : 0;
+}
+
+export function actualCostUsd(usage: { input?: number; cacheRead?: number; cacheWrite?: number; output?: number; cost?: number } | undefined, modelCost: ModelCost | undefined): number {
+	if (!usage) return 0;
+	if (typeof usage.cost === "number") return usage.cost;
+	if (!modelCost || typeof modelCost.input !== "number" || typeof modelCost.output !== "number") return 0;
+	const input = readNumber(usage.input);
+	const cacheRead = readNumber(usage.cacheRead);
+	const cacheWrite = readNumber(usage.cacheWrite);
+	return (input * modelCost.input + cacheRead * readNumber(modelCost.cacheRead) + cacheWrite * readNumber(modelCost.cacheWrite) + readNumber(usage.output) * modelCost.output) / 1_000_000;
 }
 
 export function costToCompact(usage: Pick<UsageSnapshot, "input" | "cacheRead" | "cacheWrite"> | undefined, modelCost: ModelCost | undefined): number {
@@ -92,21 +139,122 @@ export function costToCompact(usage: Pick<UsageSnapshot, "input" | "cacheRead" |
 
 export function addUsage(stats: CacheStats, snapshot: UsageSnapshot | undefined, modelId?: string, modelCost?: ModelCost): CacheStats {
 	if (!snapshot) return stats;
-	const savings = savingsFromRealCost(snapshot, modelCost) || cacheSavingsUsdFromCost(modelCost, snapshot.cacheRead) || cacheSavingsUsd(modelId, snapshot.cacheRead);
-	const nextSnapshot = { ...snapshot, savings, totalInput: snapshot.totalInput ?? snapshot.input + snapshot.cacheRead + snapshot.cacheWrite, hitRate: snapshot.hitRate ?? hitRatio(snapshot.input, snapshot.cacheRead, snapshot.cacheWrite) ?? 0 };
+	const effectiveModelId = snapshot.modelId ?? modelId;
+	const effectiveCost = resolveModelCost(effectiveModelId, snapshot.modelCost ?? modelCost);
+	const cost = actualCostUsd(snapshot, effectiveCost);
+	const noCacheCost = noCacheCostUsd(snapshot, effectiveCost);
+	const savings = (noCacheCost > 0 && cost > 0 ? Math.max(0, noCacheCost - cost) : 0) || cacheSavingsUsdFromCost(effectiveCost, snapshot.cacheRead);
+	const nextSnapshot = {
+		...snapshot,
+		modelId: effectiveModelId,
+		modelCost: effectiveCost,
+		cost,
+		actualCost: cost,
+		noCacheCost,
+		savings,
+		totalInput: snapshot.totalInput ?? snapshot.input + snapshot.cacheRead + snapshot.cacheWrite,
+		hitRate: snapshot.hitRate ?? hitRatio(snapshot.input, snapshot.cacheRead, snapshot.cacheWrite) ?? 0,
+	};
 	return {
 		requests: stats.requests + 1,
 		input: stats.input + snapshot.input,
 		cacheRead: stats.cacheRead + snapshot.cacheRead,
 		cacheWrite: stats.cacheWrite + snapshot.cacheWrite,
 		output: stats.output + snapshot.output,
-		cost: stats.cost + (snapshot.cost ?? 0),
+		cost: stats.cost + cost,
 		savings: stats.savings + savings,
 		sinceCompactionRequests: stats.sinceCompactionRequests + 1,
 		last: nextSnapshot,
 		usages: [...(stats.usages ?? []), nextSnapshot],
 		compacts: stats.compacts ?? [],
 	};
+}
+
+function accumulateUsage<T extends { requests: number; input: number; cacheRead: number; cacheWrite: number; output: number; actualCost: number }>(target: T, usage: UsageSnapshot): T {
+	target.requests++;
+	target.input += usage.input;
+	target.cacheRead += usage.cacheRead;
+	target.cacheWrite += usage.cacheWrite;
+	target.output += usage.output;
+	target.actualCost += usage.actualCost ?? usage.cost ?? 0;
+	return target;
+}
+
+export function aggregateByModel(usages: UsageSnapshot[]): ModelUsageSummary[] {
+	const byModel = new Map<string, ModelUsageSummary>();
+	for (const usage of usages ?? []) {
+		const modelId = usage.modelId ?? "unknown";
+		let summary = byModel.get(modelId);
+		if (!summary) {
+			summary = { modelId, provider: usage.provider, requests: 0, input: 0, cacheRead: 0, cacheWrite: 0, output: 0, actualCost: 0, noCacheCost: 0, savings: 0, pricingKnown: false };
+			byModel.set(modelId, summary);
+		}
+		accumulateUsage(summary, usage);
+		if (!summary.provider && usage.provider) summary.provider = usage.provider;
+		if (usage.modelCost && typeof usage.modelCost.input === "number" && typeof usage.modelCost.output === "number") summary.pricingKnown = true;
+		if (summary.noCacheCost !== undefined) summary.noCacheCost += usage.noCacheCost ?? 0;
+		if (summary.savings !== undefined) summary.savings += usage.savings ?? 0;
+	}
+	for (const summary of byModel.values()) {
+		summary.hitRate = hitRatio(summary.input, summary.cacheRead, summary.cacheWrite);
+		if (!summary.pricingKnown) {
+			summary.noCacheCost = undefined;
+			summary.savings = undefined;
+		}
+	}
+	return [...byModel.values()];
+}
+
+export function warmHitRate(usages: UsageSnapshot[]): number | undefined {
+	const warm = (usages ?? []).filter((usage) => usage.warmup !== true);
+	const input = warm.reduce((sum, usage) => sum + usage.input, 0);
+	const cacheRead = warm.reduce((sum, usage) => sum + usage.cacheRead, 0);
+	const cacheWrite = warm.reduce((sum, usage) => sum + usage.cacheWrite, 0);
+	return hitRatio(input, cacheRead, cacheWrite);
+}
+
+export function aggregateBySegment(usages: UsageSnapshot[]): SegmentUsageSummary[] {
+	const bySegment = new Map<string, { summary: SegmentUsageSummary; usages: UsageSnapshot[] }>();
+	for (const usage of usages ?? []) {
+		const segmentId = usage.segmentId ?? "unknown";
+		let bucket = bySegment.get(segmentId);
+		if (!bucket) {
+			bucket = {
+				summary: { segmentId, checkpointId: usage.checkpointId, checkpointReason: usage.checkpointReason, modelId: usage.modelId, requests: 0, warmupRequests: 0, input: 0, cacheRead: 0, cacheWrite: 0, output: 0, actualCost: 0, noCacheCost: 0, savings: 0 },
+				usages: [],
+			};
+			bySegment.set(segmentId, bucket);
+		}
+		accumulateUsage(bucket.summary, usage);
+		bucket.usages.push(usage);
+		if (usage.warmup) bucket.summary.warmupRequests++;
+		if (bucket.summary.noCacheCost !== undefined) bucket.summary.noCacheCost += usage.noCacheCost ?? 0;
+		if (bucket.summary.savings !== undefined) bucket.summary.savings += usage.savings ?? 0;
+		if (!bucket.summary.modelId && usage.modelId) bucket.summary.modelId = usage.modelId;
+		if (!bucket.summary.checkpointReason && usage.checkpointReason) bucket.summary.checkpointReason = usage.checkpointReason;
+	}
+	return [...bySegment.values()].map((bucket) => ({
+		...bucket.summary,
+		hitRate: hitRatio(bucket.summary.input, bucket.summary.cacheRead, bucket.summary.cacheWrite),
+		warmHitRate: warmHitRate(bucket.usages),
+	}));
+}
+
+export function currentSegmentStats(state: RuntimeState): CacheStats {
+	const usages = (state.stats.usages ?? []).filter((usage) => usage.segmentId === state.engine.currentSegmentId);
+	return usages.reduce((stats, usage) => ({
+		requests: stats.requests + 1,
+		input: stats.input + usage.input,
+		cacheRead: stats.cacheRead + usage.cacheRead,
+		cacheWrite: stats.cacheWrite + usage.cacheWrite,
+		output: stats.output + usage.output,
+		cost: stats.cost + (usage.actualCost ?? usage.cost ?? 0),
+		savings: stats.savings + (usage.savings ?? 0),
+		sinceCompactionRequests: stats.sinceCompactionRequests + 1,
+		last: usage,
+		usages: [...stats.usages, usage],
+		compacts: state.stats.compacts ?? [],
+	}), emptyStats());
 }
 
 export function markCompaction(stats: CacheStats, record?: { turn: number; reason: "auto" | "manual" | "host"; completed: boolean; error?: string }): CacheStats {
@@ -130,7 +278,7 @@ export function computeHitRatio(input: number, cacheRead: number, cacheWrite = 0
 }
 
 export function formatRatio(ratio: number | undefined): string {
-	return typeof ratio === "number" ? `${Math.round(ratio * 100)}%` : "n/a";
+	return typeof ratio === "number" ? `${(ratio * 100).toFixed(1)}%` : "n/a";
 }
 
 export function formatTokenCount(tokens: number): string {

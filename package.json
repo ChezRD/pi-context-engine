@@ -1,19 +1,23 @@
 {
-  "name": "pi-deepseek-cache",
-  "version": "0.1.0",
-  "description": "DeepSeek prompt-cache telemetry and context coordination for Pi coding agent",
+  "name": "pi-context-engine",
+  "version": "0.2.3",
+  "description": "Unified Pi context management: prompt-cache telemetry, semantic folding, pruning, checkpoints, and visualization",
   "type": "module",
   "keywords": [
     "pi-package",
     "pi-extension",
-    "deepseek",
     "cache",
-    "context-prune"
+    "prompt-cache",
+    "context-prune",
+    "context-management",
+    "checkpoint",
+    "semantic-fold"
   ],
   "license": "MIT",
   "files": [
     "src/**/*.ts",
     "README.md",
+    "THIRD_PARTY_NOTICES.md",
     "LICENSE"
   ],
   "pi": {
@@ -23,9 +27,11 @@
   },
   "scripts": {
     "test": "node --test tests/**/*.test.mjs",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "npm run typecheck:project",
+    "typecheck:project": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*",
     "@juicesharp/rpiv-i18n": "*"

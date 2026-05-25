@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import type { RuntimeState } from "../runtime-state.ts";
 import { t } from "../i18n/index.ts";
+import { formatPrefixReason } from "../prefix-reasons.ts";
+import { currentCacheSegment, handlePrefixCheckpoint } from "./cache-checkpoints.ts";
 
 export interface CanonicalPrefix {
 	model?: string;
@@ -12,7 +14,7 @@ export interface CanonicalPrefix {
 
 export interface PrefixDrift {
 	hard: boolean;
-	reasons: Array<"model" | "system" | "tools" | "reasoning" | "temperature">;
+	reasons: Array<"model" | "system" | "tools" | "reasoning">;
 }
 
 export function stableHash(value: unknown): string {
@@ -64,7 +66,6 @@ export function diffPrefix(previous: CanonicalPrefix, next: CanonicalPrefix): Pr
 	if (previous.systemHash !== next.systemHash) reasons.push("system");
 	if (previous.toolsHash !== next.toolsHash) reasons.push("tools");
 	if (previous.reasoning !== next.reasoning) reasons.push("reasoning");
-	if (previous.temperature !== next.temperature) reasons.push("temperature");
 	return { reasons, hard: reasons.some((reason) => reason === "model" || reason === "system" || reason === "tools") };
 }
 
@@ -87,6 +88,13 @@ export function handleProviderPrefix(event: any, ctx: any, state: RuntimeState):
 		state.engine.prefixHash = prefixHash;
 		state.engine.prefixFingerprint = prefixHash;
 		state.engine.toolHash = prefix.toolsHash;
+		state.engine.lastProviderModelId = prefix.model;
+		state.engine.lastProviderPrefixHash = prefixHash;
+		const segment = currentCacheSegment(state);
+		segment.modelId = prefix.model;
+		segment.provider = state.detection?.provider;
+		segment.prefixHash = prefixHash;
+		segment.toolHash = prefix.toolsHash;
 		state.engine.lastPrefixNotificationSuppressed = false;
 		(state as any).__lastCachePrefix = prefix;
 		return;
@@ -97,9 +105,14 @@ export function handleProviderPrefix(event: any, ctx: any, state: RuntimeState):
 	state.engine.toolHash = prefix.toolsHash;
 	(state as any).__lastCachePrefix = prefix;
 	if (drift.reasons.length === 0) {
+		state.engine.lastProviderModelId = prefix.model;
+		state.engine.lastProviderPrefixHash = prefixHash;
 		state.engine.lastPrefixNotificationSuppressed = false;
 		return;
 	}
+	handlePrefixCheckpoint(state, drift, prefix);
+	state.engine.lastProviderModelId = prefix.model;
+	state.engine.lastProviderPrefixHash = prefixHash;
 	state.engine.prefixDriftCount++;
 	if (state.config.toolFingerprint && drift.reasons.includes("tools")) state.engine.toolHashChanges++;
 	state.engine.lastPrefixChangeTurn = state.engine.turnIndex;
@@ -110,7 +123,7 @@ export function handleProviderPrefix(event: any, ctx: any, state: RuntimeState):
 		state.engine.lastPrefixWarningReason = drift.reasons.join(",");
 		state.engine.lastPrefixWarningTurn = state.engine.turnIndex;
 		state.engine.lastPrefixNotificationSuppressed = false;
-		ctx?.ui?.notify?.(t("engine.prefixChangedReason", { reason: state.engine.lastPrefixChangeReason }), "warning");
+		ctx?.ui?.notify?.(t(state.config, "engine.prefixChangedReason", { reason: formatPrefixReason(state.config, state.engine.lastPrefixChangeReason, "detail") }), "warning");
 	} else {
 		state.engine.lastPrefixNotificationSuppressed = true;
 	}

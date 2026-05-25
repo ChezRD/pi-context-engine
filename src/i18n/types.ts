@@ -1,4 +1,4 @@
-export const I18N_NAMESPACE = "pi-deepseek-cache";
+export const I18N_NAMESPACE = "pi-context-engine";
 
 export const I18N_LOCALES = ["de", "en", "es", "fr", "pt", "pt-BR", "ru", "uk", "zh-CN"] as const;
 export type Locale = typeof I18N_LOCALES[number];

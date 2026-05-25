@@ -1,7 +1,112 @@
 export type StatusLevel = "off" | "ok" | "warn" | "danger";
 
+export type DecisionKind = "none" | "warn" | "hold" | "fold" | "aggressive-fold" | "exit-with-summary" | "preflight-fold";
+
+export interface Decision {
+	kind: DecisionKind;
+	ratio: number;
+	ctxUsed: number;
+	ctxMax: number;
+	tailBudget?: number;
+	aggressive?: boolean;
+}
+
+export interface FoldBoundary {
+	ok: boolean;
+	headMessages: any[];
+	tailMessages: any[];
+	headTokenCount: number;
+	tailTokenCount: number;
+	totalTokenCount: number;
+	tailStartIndex: number;
+	reason?: string;
+}
+
+export interface PinnedSkill {
+	id: string;
+	content: string;
+}
+
+export type PinnedContextKind = "skill" | "priority" | "user-memory" | "project-memory" | "context-file";
+
+export interface ContextEnginePin {
+	kind: PinnedContextKind;
+	name: string;
+	content: string;
+	version?: number;
+	priority?: "normal" | "high";
+	/** Original XML block (verbatim) */
+	raw: string;
+}
+
+export interface FoldResult {
+	ok: boolean;
+	savedContext?: number;
+	totalTokens?: number;
+	headMessages?: number;
+	tailMessages?: number;
+	ctxAfterPct?: number;
+	reason?: string;
+}
+
+export interface ModelCost {
+	input?: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+	output?: number;
+}
+
+export type CacheCheckpointReason =
+	| "session_start"
+	| "user_checkpoint"
+	| "agent_checkpoint"
+	| "rewind"
+	| "model_select"
+	| "provider_model_drift"
+	| "system_drift"
+	| "tools_drift"
+	| "reasoning_drift"
+	| "semantic_fold"
+	| "compact"
+	| "prune"
+	| "pin_drift"
+	| "manual_reset";
+
+export interface CacheCheckpoint {
+	id: string;
+	turn: number;
+	createdAt: number;
+	reason: CacheCheckpointReason;
+	modelId?: string;
+	provider?: string;
+	prefixHash?: string;
+	toolHash?: string;
+	previousModelId?: string;
+	note?: string;
+	conversationEntryId?: string;
+	conversationLabel?: string;
+	conversationBranchId?: string;
+}
+
+export interface CacheSegment {
+	id: string;
+	checkpointId: string;
+	startTurn: number;
+	endTurn?: number;
+	modelId?: string;
+	provider?: string;
+	prefixHash?: string;
+	toolHash?: string;
+	warmupRequests: number;
+}
+
 export interface UsageSnapshot {
 	turn?: number;
+	checkpointId?: string;
+	segmentId?: string;
+	modelId?: string;
+	provider?: string;
+	modelCost?: ModelCost;
 	input: number;
 	cacheRead: number;
 	cacheWrite: number;
@@ -9,7 +114,11 @@ export interface UsageSnapshot {
 	totalInput?: number;
 	hitRate?: number;
 	cost?: number;
+	actualCost?: number;
+	noCacheCost?: number;
 	savings?: number;
+	warmup?: boolean;
+	checkpointReason?: CacheCheckpointReason;
 	requestId?: string;
 	createdAt: number;
 }
@@ -79,8 +188,93 @@ export interface AppendOnlyProjectionState {
 	invalidatedReason?: string;
 }
 
+export interface PendingRewind {
+	targetId: string;
+	newBranchId: string;
+	summaryMsg: string;
+}
+
+export interface PruneState {
+	pendingBatches: Array<{
+		turnIndex: number;
+		context?: string;
+		toolCalls: Array<{
+			id: string;
+			name: string;
+			turnIndex: number;
+			args?: string;
+			result?: string;
+			context?: string;
+		}>;
+	}>;
+	pendingSummaries: string[];
+	summarizedIds: string[];
+	skippedOversizedIds?: string[];
+	summarizedRecords?: Array<{
+		toolCallId: string;
+		toolName: string;
+		turnIndex: number;
+		summarized: boolean;
+		summaryText?: string;
+	}>;
+	appliedIds: string[];
+	pruneRunCount: number;
+	batchStepCounter: number;
+	checkpointTriggered?: boolean;
+	awaitingImpact?: {
+		turn: number;
+		appliedIds: string[];
+	};
+	impact: {
+		summarizeRequests: number;
+		summarizeInputTokens: number;
+		summarizeOutputTokens: number;
+		summarizeCost: number;
+		summarizeToolCalls: number;
+		summarizeRawChars?: number;
+		summarizeSummaryChars?: number;
+		lastSummarizeCost?: number;
+		lastSummarizeToolCalls?: number;
+		lastSummarizeRawChars?: number;
+		lastSummarizeSummaryChars?: number;
+		lastSummarizePrompt?: string;
+		lastSummarizeResponse?: string;
+		lastAcceptedSummaries?: string[];
+		lastSummarizeMaxTokens?: number;
+		postPruneRequests: number;
+		postPruneMissTokens: number;
+		postPruneCacheReadTokens: number;
+		postPruneMissCost: number;
+		lastPostPruneHitRate?: number;
+		lastPostPruneMissTokens?: number;
+		lastPostPruneMissCost?: number;
+		lastError?: string;
+	};
+}
+
+export interface BranchingState {
+	pendingRewind: PendingRewind | null;
+}
+
+export interface SemanticFoldState {
+	active: boolean;
+	foldedThisTurn: boolean;
+	syntheticMsg?: any;
+	tailStartEntryId?: string | null;
+}
+
 export interface CacheEngineState {
 	turnIndex: number;
+	checkpoints: CacheCheckpoint[];
+	segments: CacheSegment[];
+	currentSegmentId?: string;
+	lastProviderModelId?: string;
+	lastProviderPrefixHash?: string;
+	pendingUsageModelId?: string;
+	pendingUsageProvider?: string;
+	semanticFold: SemanticFoldState;
+	prune: PruneState;
+	branching: BranchingState;
 	prefixFingerprint?: string;
 	prefixHash?: string;
 	toolHash?: string;
@@ -106,4 +300,5 @@ export interface CacheEngineState {
 	appendOnly: AppendOnlyProjectionState;
 	recentToolCalls: Map<string, number>;
 	foldToolRegistered: boolean;
+	lastPinInjectionHash?: string;
 }

@@ -23,11 +23,11 @@ test("all registered locales have full key coverage and no empty strings", () =>
 test("local runtime supports English, Russian, and Chinese without required SDK", () => {
   try {
     applyLocale("en");
-    assert.equal(t("status.title"), "DeepSeek cache");
+    assert.equal(t("status.title"), "Context cache");
     assert.equal(t("cmd.init.done", { path: "/tmp/x" }), "Wrote /tmp/x");
 
     applyLocale("ru");
-    assert.equal(t("status.title"), "Кеш DeepSeek");
+    assert.equal(t("status.title"), "Кэш контекста");
     assert.equal(t("cmd.init.done", { path: "/tmp/x" }), "Записан /tmp/x");
 
     applyLocale("zh-CN");
@@ -49,7 +49,7 @@ test("language env parsing preserves region and fixes Chinese", () => {
 test("detectLocale reads rpiv config file before LANG", async () => {
   const oldHome = process.env.HOME;
   const oldLang = process.env.LANG;
-  const home = await mkdtemp(join(tmpdir(), "pi-deepseek-cache-i18n-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-context-engine-i18n-"));
   try {
     applyLocale(undefined);
     process.env.HOME = home;
