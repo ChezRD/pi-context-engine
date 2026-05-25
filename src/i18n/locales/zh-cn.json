@@ -76,6 +76,59 @@
   "engine.zone.orange": "橙色",
   "engine.zone.red": "红色",
   "engine.zone.yellow": "黄色",
+  "intent.actionVerbs": [
+    "call",
+    "invoke",
+    "run",
+    "use",
+    "execute"
+  ],
+  "intent.explanationMarkers": [
+    "example",
+    "schema",
+    "parameters",
+    "syntax"
+  ],
+  "intent.futureMarkers": [
+    "now",
+    "next",
+    "then",
+    "will"
+  ],
+  "intent.toolNouns": [
+    "tool",
+    "function"
+  ],
+  "intent.user.analyzeWords": [
+    "analyze",
+    "analyse",
+    "inspect",
+    "audit",
+    "review",
+    "diagnose",
+    "debug",
+    "study",
+    "investigate"
+  ],
+  "intent.user.pruneWords": [
+    "prune",
+    "compact",
+    "compress",
+    "summarize",
+    "summarise",
+    "pruning"
+  ],
+  "intent.user.searchWords": [
+    "search",
+    "find",
+    "locate",
+    "lookup",
+    "look up",
+    "grep",
+    "scan",
+    "browse",
+    "trace"
+  ],
   "payload.assistantMessages": "助手消息：{count}",
   "payload.includeUsage": "已请求流式使用统计：{value}",
   "payload.messages": "已发送消息：{count}",
@@ -181,6 +234,9 @@
   "status.pruneNext.off": "关闭",
   "status.pruneNext.toolBatch": "有工具批次时",
   "status.pruneNext.turns": "{turns} 次回复后",
+  "status.prunePreservedDuringFlush": "清理期间保留：{batches} 个批次 · {tools} 次工具调用 · 最近 {lastBatches}/{lastTools}",
+  "status.pruneRebuildImpact": "重建：{source} -> {output} 条消息 · 可清理 {prunable} · 已应用 {applied} · 约节省 {saved} · 检查点 {checkpoint} · {reason}",
+  "status.pruneRegret": "压缩后重复读取：查找 {lookup} · 读取 {read} · 折叠后读取 {foldRead}",
   "status.prunerNotDetected": "未检测到扩展 pi-context-prune",
   "status.pruneSliceImpact": "清理切片：{raw} -> {summary} · 节省 {delta} · 最近 {lastRaw} -> {lastSummary}",
   "status.pruneSummaryImpact": "清理摘要成本：{requests} 次请求 · {tokens} 个令牌 · 总计 ${cost} · 最近 ${last}",
@@ -334,7 +390,10 @@
   "ui.dashboard.pruneMode": "模式",
   "ui.dashboard.pruneNext": "下次",
   "ui.dashboard.prunePending": "待处理",
+  "ui.dashboard.prunePreservedDuringFlush": "清理期间保留 {batches} 个批次 · {tools} 个工具 · 最近 {lastBatches}/{lastTools}",
   "ui.dashboard.pruneProgress": "进度 {progress} / 阈值 {target}",
+  "ui.dashboard.pruneRebuildImpact": "重建 {source}->{output} 条 · 可清理 {prunable} · 已应用 {applied} · 约省 {saved} · 检查点 {checkpoint}",
+  "ui.dashboard.pruneRegret": "重复读取 查找 {lookup} · 读取 {read} · 折叠后读取 {foldRead}",
   "ui.dashboard.pruneSliceImpact": "替换切片 {raw} -> {summary} · 节省 {delta} · 最近 {lastRaw} -> {lastSummary}",
   "ui.dashboard.pruneSummarized": "已摘要",
   "ui.dashboard.pruneSummaryImpact": "摘要请求 {requests} · 令牌 {tokens} · 成本 {cost} · 最近 {last}",

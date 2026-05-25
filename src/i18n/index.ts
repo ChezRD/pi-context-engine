@@ -23,7 +23,7 @@ function sortMessages(messages: Messages): Messages {
 
 function loadLocale(file: string): Messages {
 	const url = new URL(`./locales/${file}`, import.meta.url);
-	return sortMessages(JSON.parse(readFileSync(url, "utf8")) as Record<string, string>);
+	return sortMessages(JSON.parse(readFileSync(url, "utf8")) as Messages);
 }
 
 export const messages: LocaleMessages = Object.freeze({
@@ -177,7 +177,8 @@ function lookup(namespace: string, key: string, vars?: Record<string, string | n
 	rebuildActive(namespace);
 	const runtime = getRuntime();
 	const active = runtime.activeStrings.get(namespace) ?? en;
-	return interpolate(active[key] ?? en[key] ?? key, vars);
+	const value = active[key] ?? en[key];
+	return interpolate(typeof value === "string" ? value : key, vars);
 }
 
 export function t(configOrKey: unknown, keyOrVars?: string | Record<string, string | number | undefined>, maybeVars?: Record<string, string | number | undefined>): string {
@@ -186,6 +187,46 @@ export function t(configOrKey: unknown, keyOrVars?: string | Record<string, stri
 		? (keyOrVars && typeof keyOrVars === "object" ? keyOrVars as Record<string, string | number | undefined> : maybeVars)
 		: maybeVars;
 	return lookup(I18N_NAMESPACE, key, vars);
+}
+
+export function tArray(key: string, locale?: string): string[] {
+	const active = locale
+		? pickStringsForLocale(getRuntime().registry.get(I18N_NAMESPACE) ?? new Map([["en", en]]), normalizeLocale(locale) ?? "en")
+		: (() => {
+			rebuildActive(I18N_NAMESPACE);
+			return getRuntime().activeStrings.get(I18N_NAMESPACE) ?? en;
+		})();
+	const value = active[key] ?? en[key];
+	return Array.isArray(value) ? [...value] : typeof value === "string" && value.length > 0 ? value.split("|").map((item) => item.trim()).filter(Boolean) : [];
+}
+
+function arrayValue(value: unknown): string[] {
+	return Array.isArray(value)
+		? value.filter((item): item is string => typeof item === "string" && item.length > 0)
+		: typeof value === "string" && value.length > 0
+			? value.split("|").map((item) => item.trim()).filter(Boolean)
+			: [];
+}
+
+export function localeFallbackChain(locale?: string): string[] {
+	const normalized = normalizeLocale(locale) ?? "en";
+	const chain = [normalized];
+	const parent = normalized.includes("-") ? normalized.split("-")[0] : undefined;
+	if (parent && parent !== normalized) chain.push(parent);
+	if (!chain.includes("en")) chain.push("en");
+	return chain;
+}
+
+export function tArrayMerged(key: string, locale?: string): string[] {
+	const byLocale = getRuntime().registry.get(I18N_NAMESPACE) ?? new Map([["en", en]]);
+	const values: string[] = [];
+	for (const candidate of localeFallbackChain(locale)) {
+		const strings = findLocaleMap(byLocale, candidate);
+		if (!strings) continue;
+		values.push(...arrayValue(strings[key]));
+	}
+	for (const fallback of arrayValue(en[key])) values.push(fallback);
+	return Array.from(new Set(values));
 }
 
 registerStrings(I18N_NAMESPACE, messages);

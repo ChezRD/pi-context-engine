@@ -14,7 +14,7 @@ import { CUSTOM_TYPE_HUGE_RESULT, HugeResultStore, buildPreview, maybeCapToolRes
 import { MODEL_VISIBLE_CONTEXT_MARKER, MODEL_VISIBLE_CONTEXT_SCHEMA } from "../src/model-visible.ts";
 import { estimateTokens, maybeAdjustCutForCache, simpleHash } from "../src/cache-engine/custom-compaction.ts";
 import { openCacheCheckpoint, currentCacheSegment, annotateUsageForCurrentSegment } from "../src/cache-engine/cache-checkpoints.ts";
-import { canCompactNow, decideCompaction, detectTextualToolCall, diffPrefix, extractCachePrefix, handleContext, handleMessageEnd, handleProviderPrefix, handleSessionBeforeCompact, handleToolCall, handleTurnEnd, normalizeTools, registerParallelReadTool, shouldNotifyPrefixDrift, stableHash } from "../src/cache-engine/index.ts";
+import { canCompactNow, decideCompaction, detectTextualToolCall, detectToolIntent, detectUserIntent, diffPrefix, extractCachePrefix, handleContext, handleMessageEnd, handleProviderPrefix, handleSessionBeforeCompact, handleToolCall, handleTurnEnd, loadToolIntentVocabulary, normalizeTools, registerParallelReadTool, shouldNotifyPrefixDrift, stableHash } from "../src/cache-engine/index.ts";
 import { decideAfterUsage, estimateTurnStart, readContextUsage, zoneForRatio } from "../src/cache-engine/decision-engine.ts";
 import { CUSTOM_TYPE_PRUNE_DEBUG, CUSTOM_TYPE_TELEMETRY, restoreTelemetryFromSession } from "../src/telemetry-persistence.ts";
 import { pruneMessages } from "../src/projection/pruner.ts";
@@ -472,7 +472,7 @@ test("manual prune rebuild opens prune checkpoint exactly once for newly applied
   assert.equal(state.engine.checkpoints.length, checkpointCount);
 });
 
-test("executePrune reports noneSummarized when summary model returns no usable output", async () => {
+test("executePrune falls back to observation mask when summary model returns no usable output", async () => {
   const state = createRuntimeState();
   state.config.diagnostics = true;
   state.config.persistDiagnostics = true;
@@ -493,15 +493,15 @@ test("executePrune reports noneSummarized when summary model returns no usable o
       sessionManager: {
         getBranch: () => [
           { type: "message", message: { role: "assistant", tool_calls: [{ id: "tc-1", function: { name: "read", arguments: "{}" } }] } },
-          { type: "message", message: { role: "toolResult", toolCallId: "tc-1", content: "large result" } },
+          { type: "message", message: { role: "toolResult", toolCallId: "tc-1", content: "x".repeat(2000) } },
         ],
       },
     };
 
     const result = await executePrune(pi, ctx, state.toolIndexer, state, "auto");
 
-    assert.equal(result.details.reason, "none_summarized");
-    assert.equal(result.details.summarized, 0);
+    assert.equal(result.details.reason, "summarized");
+    assert.equal(result.details.summarized, 1);
     assert.equal(result.details.attempted, 1);
     assert.equal(result.details.summaryRequests, 1);
     assert.equal(result.details.error, "summary response was empty");
@@ -510,9 +510,11 @@ test("executePrune reports noneSummarized when summary model returns no usable o
     assert.match(state.engine.prune.impact.lastSummarizePrompt, /"payload_kind": "tool_call_batches_v2"/);
     assert.equal(state.engine.prune.impact.lastSummarizeResponse, "");
     assert.equal(state.engine.prune.impact.lastError, "summary response was empty");
+    assert.equal(state.toolIndexer.isSummarized("tc-1"), true);
+    assert.match(state.toolIndexer.getRecord("tc-1").summaryText, /Tool output masked/);
     assert.equal(entries.some((entry) => entry.customType === CUSTOM_TYPE_PRUNE_DEBUG && entry.data.error === "summary response was empty"), true);
     assert.equal(entries.some((entry) => entry.customType === CUSTOM_TYPE_TELEMETRY), true);
-    assert.equal(result.text, t("tool.prune.noneSummarized"));
+    assert.match(result.text, /1/);
   } finally {
     process.env.LANG = originalLang;
     applyLocale(undefined);
@@ -655,7 +657,7 @@ test("executePrune uses explicit summarizer override and skips inefficient repla
   assert.equal(result.details.skippedOversized, 1);
 });
 
-test("executePrune reports empty or malformed summarizer responses without marking tools summarized", async () => {
+test("executePrune masks empty or malformed summarizer responses for large tool results", async () => {
   const variants = [
     { name: "null", response: null, error: "summary model returned no response", requests: 1 },
     { name: "undefined", response: undefined, error: "summary model returned no response", requests: 1 },
@@ -671,7 +673,7 @@ test("executePrune reports empty or malformed summarizer responses without marki
         sessionManager: {
           getBranch: () => [
             { type: "message", message: { role: "assistant", tool_calls: [{ id: `tc-${variant.name}`, function: { name: "read", arguments: "{}" } }] } },
-            { type: "message", message: { role: "toolResult", toolCallId: `tc-${variant.name}`, content: "large result" } },
+            { type: "message", message: { role: "toolResult", toolCallId: `tc-${variant.name}`, content: "x".repeat(2000) } },
           ],
         },
       },
@@ -680,11 +682,12 @@ test("executePrune reports empty or malformed summarizer responses without marki
       "auto",
     );
 
-    assert.equal(result.details.reason, "none_summarized", variant.name);
-    assert.equal(result.details.summarized, 0, variant.name);
+    assert.equal(result.details.reason, "summarized", variant.name);
+    assert.equal(result.details.summarized, 1, variant.name);
     assert.equal(result.details.summaryRequests, variant.requests, variant.name);
     assert.equal(result.details.error, variant.error, variant.name);
-    assert.equal(state.toolIndexer.isSummarized(`tc-${variant.name}`), false, variant.name);
+    assert.equal(state.toolIndexer.isSummarized(`tc-${variant.name}`), true, variant.name);
+    assert.match(state.toolIndexer.getRecord(`tc-${variant.name}`).summaryText, /Tool output masked/, variant.name);
   }
 });
 
@@ -1198,20 +1201,104 @@ test("tool call repair is read-specific and duplicate suppression window is boun
   assert.equal(handleToolCall({ toolName: "read", input: { path: "a.ts" } }, {}, state), undefined);
 });
 
-test("detectTextualToolCall flags explicit prose tool calls and avoids provider/definition false positives", () => {
-  assert.equal(detectTextualToolCall({ content: "I will call tool read now" }), true);
-  assert.equal(detectTextualToolCall({ content: "I will call the tool now" }), true);
-  assert.equal(detectTextualToolCall({ content: "запусти инструмент search_code" }), true);
-  assert.equal(detectTextualToolCall({ content: "Вызови функцию get_weather" }), true);
-  assert.equal(detectTextualToolCall({ content: "используй функцию context_result_lookup" }), true);
-  assert.equal(detectTextualToolCall({ content: "function call: read({ path: 'a.ts' })" }), true);
-  assert.equal(detectTextualToolCall({ content: "normal answer" }), false);
-  assert.equal(detectTextualToolCall({ content: "This answer explains what a function call is." }), false);
-  assert.equal(detectTextualToolCall({ content: "вот пример вызова search_code" }), false);
-  assert.equal(detectTextualToolCall({ content: "If the tool schema has offset and limit, I can call it like:\n```json\n{\"name\":\"context_result_lookup\",\"parameters\":{\"ref\":\"dsc-1\",\"offset\":0,\"limit\":100}}\n```" }), false);
-  assert.equal(detectTextualToolCall({ content: "Да, смогу вызывать context_result_lookup({ ref: \"dsc-1\", offset: 0, limit: 100 }) как пример." }), false);
-  assert.equal(detectTextualToolCall({ content: "tool_call", toolCalls: [{ name: "read" }] }), false);
+test("tool call regret monitoring counts rereads of summarized refs and paths", () => {
+  const state = createRuntimeState();
+  state.engine.prune.sessionMap = {
+    version: 1,
+    builtAt: 1,
+    nodes: [],
+    segments: [{
+      id: "tool-batch:1:0",
+      kind: "tool-batch",
+      turnIndex: 1,
+      nodeIds: [],
+      dropCandidate: true,
+      facts: { refs: ["dsc-old"], paths: ["src/old.ts"], hasUnfetchedTail: false, toolNames: ["read", "context_result_lookup"] },
+    }],
+    totals: { messages: 0, toolCalls: 0, toolResults: 0, lookups: 0, summarized: 0, dropCandidates: 0 },
+  };
+  state.engine.semanticFold.active = true;
+
+  assert.equal(handleToolCall({ toolName: "context_result_lookup", input: { ref: "dsc-old" } }, {}, state), undefined);
+  state.engine.turnIndex = 2;
+  assert.equal(handleToolCall({ toolName: "read", input: { path: "src/old.ts" } }, {}, state), undefined);
+  state.engine.turnIndex = 4;
+  assert.equal(handleToolCall({ toolName: "read", input: { path: "src/new.ts" } }, {}, state), undefined);
+
+  assert.equal(state.engine.prune.impact.postPruneLookupRegret, 1);
+  assert.equal(state.engine.prune.impact.postPruneReadRegret, 1);
+  assert.equal(state.engine.prune.impact.postFoldReadRegret, 2);
 });
+
+test("detectTextualToolCall flags explicit prose tool calls and avoids provider/definition false positives", () => {
+  try {
+    applyLocale("en");
+    assert.equal(detectTextualToolCall({ content: "I will call tool read now" }), true);
+    assert.equal(detectTextualToolCall({ content: "I will call the tool now" }), true);
+    assert.equal(detectTextualToolCall({ content: "function call: read({ path: 'a.ts' })" }), true);
+    assert.equal(detectTextualToolCall({ content: "normal answer" }), false);
+    assert.equal(detectTextualToolCall({ content: "This answer explains what a function call is." }), false);
+    assert.equal(detectTextualToolCall({ content: "If the tool schema has offset and limit, I can call it like:\n```json\n{\"name\":\"context_result_lookup\",\"parameters\":{\"ref\":\"dsc-1\",\"offset\":0,\"limit\":100}}\n```" }), false);
+    assert.equal(detectTextualToolCall({ content: "tool_call", toolCalls: [{ name: "read" }] }), false);
+    assert.equal(detectTextualToolCall({ content: "tool_call", tool_calls: [{ function: { name: "read" } }] }), false);
+
+    applyLocale("ru");
+    assert.equal(detectTextualToolCall({ content: "запусти инструмент search_code" }), true);
+    assert.equal(detectTextualToolCall({ content: "Вызови функцию get_weather" }), true);
+    assert.equal(detectTextualToolCall({ content: "используй функцию context_result_lookup" }), true);
+    assert.equal(detectTextualToolCall({ content: "вот пример вызова search_code" }), false);
+    assert.equal(detectTextualToolCall({ content: "Да, смогу вызывать context_result_lookup({ ref: \"dsc-1\", offset: 0, limit: 100 }) как пример." }), false);
+  } finally {
+    applyLocale(undefined);
+  }
+});
+
+test("detectToolIntent returns reason codes and uses locale vocabulary", () => {
+  assert.deepEqual(
+    pickIntent(detectToolIntent({ content: "tool_call", tool_calls: [{ function: { name: "read" } }] })),
+    { kind: "structured-call-present", reasonCode: "structured_tool_calls", confidence: "high" },
+  );
+  assert.deepEqual(
+    pickIntent(detectToolIntent({ content: "I will call read({ path: 'a.ts' }) now" })),
+    { kind: "imminent-tool-call", reasonCode: "imperative_tool_action", confidence: "high", toolName: "read" },
+  );
+  assert.deepEqual(
+    pickIntent(detectToolIntent({ content: "read({ path: 'a.ts' })" })),
+    { kind: "imminent-tool-call", reasonCode: "call_expression", confidence: "medium", toolName: "read" },
+  );
+  assert.deepEqual(
+    pickIntent(detectToolIntent({ content: "example: read({ path: 'a.ts' })" })),
+    { kind: "example-or-schema", reasonCode: "example_context", confidence: "high", toolName: "read" },
+  );
+  assert.deepEqual(
+    pickIntent(detectToolIntent({ content: "```json\n{\"name\":\"context_result_lookup\",\"parameters\":{\"ref\":\"dsc-1\"}}\n```" })),
+    { kind: "example-or-schema", reasonCode: "code_block_only", confidence: "high" },
+  );
+  assert.deepEqual(
+    pickIntent(detectToolIntent({ content: "запусти инструмент search_code" }, { locale: "ru", registeredTools: ["search_code"] })),
+    { kind: "imminent-tool-call", reasonCode: "imperative_tool_action", confidence: "high", toolName: "search_code" },
+  );
+  assert.deepEqual(loadToolIntentVocabulary("ru").actionVerbs.includes("запусти"), true);
+  assert.deepEqual(loadToolIntentVocabulary("ru").actionVerbs.includes("call"), true);
+  assert.deepEqual(loadToolIntentVocabulary("pt-BR").fallbackLocales, ["pt-BR", "pt", "en"]);
+});
+
+test("detectUserIntent uses i18n vocabulary for user prompts", () => {
+  assert.deepEqual(pickIntent(detectUserIntent({ prompt: "please search for the file" })), { kind: "search", reasonCode: "search_request", confidence: "medium" });
+  assert.deepEqual(pickIntent(detectUserIntent({ prompt: "analyze this session" })), { kind: "analyze", reasonCode: "analysis_request", confidence: "medium" });
+  assert.deepEqual(pickIntent(detectUserIntent({ prompt: "prune the context" })), { kind: "prune-request", reasonCode: "prune_request", confidence: "high" });
+  assert.deepEqual(pickIntent(detectUserIntent({ prompt: "запусти инструмент search_code" }, { locale: "ru", registeredTools: ["search_code"] })), { kind: "tool-request", reasonCode: "explicit_tool_request", confidence: "high", toolName: "search_code" });
+});
+
+function pickIntent(result) {
+  const picked = {
+    kind: result.kind,
+    reasonCode: result.reasonCode,
+    confidence: result.confidence,
+  };
+  if (result.toolName) picked.toolName = result.toolName;
+  return picked;
+}
 
 test("huge result capper elides only above threshold and preserves recovery details", async () => {
   const store = new HugeResultStore();

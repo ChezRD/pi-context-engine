@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { readFileSync } from "node:fs";
 
-import { applyLocale, detectLocale, getActiveLocale, I18N_LOCALES, messages, parseLangEnv, t } from "../src/i18n/index.ts";
+import { applyLocale, detectLocale, getActiveLocale, I18N_LOCALES, localeFallbackChain, messages, parseLangEnv, t, tArrayMerged } from "../src/i18n/index.ts";
 
 function keysOf(locale) {
   return Object.keys(messages[locale]).sort();
@@ -65,6 +65,19 @@ test("language env parsing preserves region and fixes Chinese", () => {
   assert.equal(parseLangEnv("pt_BR.UTF-8"), "pt-BR");
   assert.equal(parseLangEnv("en_US.UTF-8"), "en-US");
   assert.equal(parseLangEnv("C"), undefined);
+});
+
+test("intent vocabulary arrays resolve through locale parent and English fallback", () => {
+  assert.deepEqual(localeFallbackChain("pt_BR.UTF-8"), ["pt-BR", "pt", "en"]);
+  assert.deepEqual(localeFallbackChain("ru"), ["ru", "en"]);
+  assert.deepEqual(localeFallbackChain("en_US.UTF-8"), ["en-US", "en"]);
+
+  const ruActions = tArrayMerged("intent.actionVerbs", "ru");
+  assert.equal(ruActions.includes("запусти"), true);
+  assert.equal(ruActions.includes("call"), true);
+
+  const ptBrActions = tArrayMerged("intent.actionVerbs", "pt-BR");
+  assert.equal(ptBrActions.includes("call"), true);
 });
 
 test("detectLocale reads rpiv config file before LANG", async () => {

@@ -3,8 +3,9 @@ import { Text } from "@earendil-works/pi-tui";
 import { DEFAULT_CONFIG, type ExtensionConfig } from "./config.ts";
 import { t } from "./i18n/index.ts";
 import { buildModelVisibleContext, extractModelVisibleMetadata, extractModelVisibleSection } from "./model-visible.ts";
+import { buildContextResultLookupHeader, CONTEXT_RESULT_LOOKUP_TOOL } from "./projection/harness-content.ts";
 
-export const CONTEXT_RESULT_LOOKUP_TOOL = "context_result_lookup";
+export { CONTEXT_RESULT_LOOKUP_TOOL };
 export const CUSTOM_TYPE_HUGE_RESULT = "context-engine-huge-result";
 const MAX_SNIPPET_LINES = 4;
 
@@ -116,7 +117,7 @@ export function buildPreview(record: StoredResult, config: ExtensionConfig): str
 			},
 		},
 		sections: [
-			{ name: "lookup", content: lookupHeader({ ref: record.ref, offset: 0, limit: record.text.length, returnedChars: record.text.length, totalChars: record.text.length, bytes: record.bytes, hasMore: false }) },
+			{ name: "lookup", content: buildContextResultLookupHeader({ ref: record.ref, offset: 0, limit: record.text.length, returnedChars: record.text.length, totalChars: record.text.length, bytes: record.bytes, hasMore: false }) },
 			{ name: "preview", content: [head, tail ? "\n…\n" : "", tail].join("\n") },
 		],
 	});
@@ -182,23 +183,6 @@ function refSlug(toolName: string | undefined): string {
 	return slug || "result";
 }
 
-function lookupHeader(details: { ref: string; offset?: number; limit?: number; returnedChars?: number; totalChars?: number; bytes?: number; hasMore?: boolean; nextOffset?: number }): string {
-	const kind = details.limit === undefined && (details.offset ?? 0) === 0 ? "full" : "slice";
-	const offset = details.offset ?? 0;
-	const returned = details.returnedChars ?? 0;
-	const end = details.returnedChars === undefined ? undefined : offset + returned;
-	const parts = [`kind=${kind}`, `ref=${details.ref}`];
-	if (details.offset !== undefined) parts.push(`offset=${details.offset}`);
-	if (details.limit !== undefined) parts.push(`limit=${details.limit}`);
-	if (end !== undefined) parts.push(`range=${offset}:${end}`);
-	if (details.returnedChars !== undefined) parts.push(`returned_chars=${details.returnedChars}`);
-	if (details.totalChars !== undefined) parts.push(`total_chars=${details.totalChars}`);
-	if (details.bytes !== undefined) parts.push(`bytes=${details.bytes}`);
-	if (details.hasMore !== undefined) parts.push(`has_more=${details.hasMore ? "true" : "false"}`);
-	if (details.nextOffset !== undefined) parts.push(`next_offset=${details.nextOffset}`);
-	return `[${CONTEXT_RESULT_LOOKUP_TOOL} ${parts.join(" ")}]`;
-}
-
 function lookupDisplay(details: { ref?: string; offset?: number; limit?: number; returnedChars?: number; totalChars?: number; bytes?: number; hasMore?: boolean }): string {
 	const ref = details.ref ?? "?";
 	const offset = details.offset ?? 0;
@@ -242,7 +226,7 @@ export function registerLookupTool(pi: any, store: HugeResultStore): void {
 			const nextOffset = offset + text.length;
 			const hasMore = nextOffset < record.text.length;
 			const details = { ref: params.ref, found: true, offset, limit, bytes: record.bytes, returnedChars: text.length, totalChars: record.text.length, hasMore, nextOffset: hasMore ? nextOffset : undefined };
-			return { content: [{ type: "text", text: `${lookupHeader(details)}\n${text}` }], details };
+			return { content: [{ type: "text", text: `${buildContextResultLookupHeader(details)}\n${text}` }], details };
 		},
 		renderCall(args: { ref?: string; offset?: number; limit?: number }, theme: any) {
 			return new Text(theme.fg("toolTitle", theme.bold(CONTEXT_RESULT_LOOKUP_TOOL)) + " " + theme.fg("accent", lookupDisplay({
@@ -253,7 +237,7 @@ export function registerLookupTool(pi: any, store: HugeResultStore): void {
 		},
 		renderResult(result: any, { expanded }: any, theme: any) {
 			const details = result?.details ?? {};
-			const header = lookupHeader({
+			const header = buildContextResultLookupHeader({
 				ref: String(details.ref ?? "?"),
 				offset: details.offset,
 				limit: details.limit,

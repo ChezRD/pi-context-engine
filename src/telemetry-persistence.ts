@@ -90,10 +90,17 @@ export function restoreTelemetryFromSession(ctx: any, state: RuntimeState): bool
 		}
 	}
 	if (!state.engine.prune.impact) {
-		state.engine.prune.impact = { summarizeRequests: 0, summarizeInputTokens: 0, summarizeOutputTokens: 0, summarizeCost: 0, summarizeToolCalls: 0, summarizeRawChars: 0, summarizeSummaryChars: 0, summarizeCacheReadTokens: 0, summarizeByModel: [], postPruneRequests: 0, postPruneMissTokens: 0, postPruneCacheReadTokens: 0, postPruneMissCost: 0 };
+		state.engine.prune.impact = { summarizeRequests: 0, summarizeInputTokens: 0, summarizeOutputTokens: 0, summarizeCost: 0, summarizeToolCalls: 0, summarizeRawChars: 0, summarizeSummaryChars: 0, summarizeCacheReadTokens: 0, summarizeByModel: [], postPruneRequests: 0, postPruneMissTokens: 0, postPruneCacheReadTokens: 0, postPruneMissCost: 0, postPruneLookupRegret: 0, postPruneReadRegret: 0, postFoldReadRegret: 0, pendingBatchesPreservedDuringFlush: 0, pendingToolCallsPreservedDuringFlush: 0, lastPendingBatchesPreservedDuringFlush: 0, lastPendingToolCallsPreservedDuringFlush: 0 };
 	}
 	state.engine.prune.impact.summarizeCacheReadTokens ??= 0;
 	state.engine.prune.impact.summarizeByModel ??= [];
+	state.engine.prune.impact.postPruneLookupRegret ??= 0;
+	state.engine.prune.impact.postPruneReadRegret ??= 0;
+	state.engine.prune.impact.postFoldReadRegret ??= 0;
+	state.engine.prune.impact.pendingBatchesPreservedDuringFlush ??= 0;
+	state.engine.prune.impact.pendingToolCallsPreservedDuringFlush ??= 0;
+	state.engine.prune.impact.lastPendingBatchesPreservedDuringFlush ??= 0;
+	state.engine.prune.impact.lastPendingToolCallsPreservedDuringFlush ??= 0;
 	if (latestPruneDebug) {
 		state.engine.prune.impact.lastSummarizePrompt ??= latestPruneDebug.prompt;
 		state.engine.prune.impact.lastSummarizeResponse ??= latestPruneDebug.response;

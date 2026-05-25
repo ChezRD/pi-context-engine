@@ -28,6 +28,9 @@ export interface ExtensionConfig {
 	pruneIncludeContext: boolean;
 	pruneBatchSize: number;
 	pruneBridgeLength: number;
+	toolIntentNudge: boolean;
+	toolIntentNudgeMinConfidence: "high" | "medium" | "low";
+	toolIntentNudgeMaxChars: number;
 	statusBarStyle: "blocks" | "sparkline" | "text";
 	autoFold: boolean;
 	foldTailPct: number;
@@ -119,6 +122,9 @@ export const DEFAULT_CONFIG: ExtensionConfig = {
 	pruneIncludeContext: false,
 	pruneBatchSize: 5,
 	pruneBridgeLength: 2,
+	toolIntentNudge: true,
+	toolIntentNudgeMinConfidence: "medium",
+	toolIntentNudgeMaxChars: 500,
 	statusBarStyle: "sparkline",
 	foldThreshold: 0.75,
 	aggressiveFoldThreshold: 0.78,
@@ -162,6 +168,10 @@ function num(value: unknown, fallback: number, min = 0): number {
 function intRange(value: unknown, fallback: number, min: number, max: number): number {
 	const n = typeof value === "number" && Number.isFinite(value) ? value : fallback;
 	return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function confidence(value: unknown, fallback: "high" | "medium" | "low"): "high" | "medium" | "low" {
+	return value === "high" || value === "medium" || value === "low" ? value : fallback;
 }
 
 function pct(value: unknown, fallback: number): number {
@@ -222,6 +232,9 @@ export function parseConfig(value: unknown): ExtensionConfig {
 		pruneIncludeContext: bool(value.pruneIncludeContext, DEFAULT_CONFIG.pruneIncludeContext),
 		pruneBatchSize: intRange(value.pruneBatchSize, DEFAULT_CONFIG.pruneBatchSize, 1, 20),
 		pruneBridgeLength: intRange(value.pruneBridgeLength, DEFAULT_CONFIG.pruneBridgeLength, 1, 8),
+		toolIntentNudge: bool(value.toolIntentNudge, DEFAULT_CONFIG.toolIntentNudge),
+		toolIntentNudgeMinConfidence: confidence(value.toolIntentNudgeMinConfidence, DEFAULT_CONFIG.toolIntentNudgeMinConfidence),
+		toolIntentNudgeMaxChars: intRange(value.toolIntentNudgeMaxChars, DEFAULT_CONFIG.toolIntentNudgeMaxChars, 120, 1200),
 		statusBarStyle: (value.statusBarStyle === "blocks" || value.statusBarStyle === "sparkline" || value.statusBarStyle === "text") ? value.statusBarStyle : DEFAULT_CONFIG.statusBarStyle,
 		foldThreshold: pct(value.foldThreshold, DEFAULT_CONFIG.foldThreshold),
 		aggressiveFoldThreshold: pct(value.aggressiveFoldThreshold, DEFAULT_CONFIG.aggressiveFoldThreshold),

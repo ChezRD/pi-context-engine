@@ -7,7 +7,7 @@ import { t } from "../i18n/index.ts";
 import { extractAssistantToolCalls, extractMessageContext, hasAssistantToolCalls } from "./batch-capture.ts";
 import { recordPruneSummarizeImpact } from "./prune-impact.ts";
 import type { RuntimeState } from "../runtime-state.ts";
-import { isReplacementSummaryEfficient } from "./tool-pruner.ts";
+import { buildObservationMaskSummary, isReplacementSummaryEfficient } from "./tool-pruner.ts";
 import type { ToolCallIndexerInstance } from "./indexer.ts";
 import { appendPruneDebugEntry, persistTelemetry } from "../telemetry-persistence.ts";
 
@@ -184,15 +184,20 @@ export async function executePrune(
 	const acceptedSummaries: string[] = [];
 	for (let i = 0; i < usableBatches.length; i++) {
 		const batch = usableBatches[i];
-		const result = results[i];
+		let result = results[i];
 		if (!result) continue;
 		if (!isReplacementSummaryEfficient(batch, result.summaryText)) {
-			const skippedIds = runtimeState ? (runtimeState.engine.prune.skippedOversizedIds ??= []) : undefined;
-			for (const tc of batch.toolCalls) {
-				if (skippedIds && !skippedIds.includes(tc.id)) skippedIds.push(tc.id);
-				skippedOversized++;
+			const mask = buildObservationMaskSummary(batch, "replacement summary was larger than raw tool slice");
+			if (isReplacementSummaryEfficient(batch, mask)) {
+				result = { summaryText: mask, usage: result.usage };
+			} else {
+				const skippedIds = runtimeState ? (runtimeState.engine.prune.skippedOversizedIds ??= []) : undefined;
+				for (const tc of batch.toolCalls) {
+					if (skippedIds && !skippedIds.includes(tc.id)) skippedIds.push(tc.id);
+					skippedOversized++;
+				}
+				continue;
 			}
-			continue;
 		}
 		if (result.summaryText.trim()) acceptedSummaries.push(result.summaryText.trim());
 		for (const tc of batch.toolCalls) {

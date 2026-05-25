@@ -19,8 +19,22 @@ function impactState(state: RuntimeState): RuntimeState["engine"]["prune"]["impa
 			postPruneMissTokens: 0,
 			postPruneCacheReadTokens: 0,
 			postPruneMissCost: 0,
+			postPruneLookupRegret: 0,
+			postPruneReadRegret: 0,
+			postFoldReadRegret: 0,
+			pendingBatchesPreservedDuringFlush: 0,
+			pendingToolCallsPreservedDuringFlush: 0,
+			lastPendingBatchesPreservedDuringFlush: 0,
+			lastPendingToolCallsPreservedDuringFlush: 0,
 		};
 	}
+	state.engine.prune.impact.postPruneLookupRegret ??= 0;
+	state.engine.prune.impact.postPruneReadRegret ??= 0;
+	state.engine.prune.impact.postFoldReadRegret ??= 0;
+	state.engine.prune.impact.pendingBatchesPreservedDuringFlush ??= 0;
+	state.engine.prune.impact.pendingToolCallsPreservedDuringFlush ??= 0;
+	state.engine.prune.impact.lastPendingBatchesPreservedDuringFlush ??= 0;
+	state.engine.prune.impact.lastPendingToolCallsPreservedDuringFlush ??= 0;
 	return state.engine.prune.impact;
 }
 

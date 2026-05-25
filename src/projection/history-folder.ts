@@ -2,6 +2,8 @@ import type { ExtensionConfig } from "../config.ts";
 import type { RuntimeState } from "../runtime-state.ts";
 import type { ContextEnginePin, FoldBoundary, PinnedSkill, FoldResult } from "../types.ts";
 
+const SESSION_INTENT_MAX_CHARS = 900;
+
 /**
  * Rough token count: chars/4.
  * Handles string, ContentPart[], and tool_calls JSON.
@@ -188,6 +190,19 @@ export function extractContextEnginePins(messages: any[]): ContextEnginePin[] {
 	return result;
 }
 
+export function extractSessionIntent(messages: any[], maxChars = SESSION_INTENT_MAX_CHARS): string | undefined {
+	const firstUser = messages.find((msg) => msg?.role === "user");
+	const userText = textContent(firstUser?.content);
+	const constraints = extractPinnedConstraints(messages);
+	const lines: string[] = [];
+	if (userText) lines.push(`Initial user goal: ${clipOneLine(userText, Math.floor(maxChars * 0.55))}`);
+	for (const constraint of constraints.slice(-3)) {
+		lines.push(`Constraint: ${clipOneLine(stripPinSyntax(constraint), Math.floor(maxChars * 0.25))}`);
+	}
+	const result = lines.join("\n").trim();
+	return result ? result.slice(0, maxChars).trim() : undefined;
+}
+
 /**
  * Build synthetic assistant message with fold marker + summary + preserved pins + constraints.
  */
@@ -197,9 +212,15 @@ export function buildFoldMessage(
 	skills: PinnedSkill[],
 	constraints: string[],
 	enginePins?: ContextEnginePin[],
+	sessionIntent?: string,
 ): any {
 	const parts: string[] = [];
 	parts.push(`${marker}\n${summary}`);
+
+	if (sessionIntent?.trim()) {
+		parts.push("\n\n[Session intent — preserved across fold:]");
+		parts.push(`\n${sessionIntent.trim()}`);
+	}
 
 	// Engine-owned pins first (higher authority)
 	if (enginePins && enginePins.length > 0) {
@@ -362,6 +383,7 @@ export async function semanticFold(
 	const skills = extractPinnedSkills(boundary.headMessages);
 	const constraints = extractPinnedConstraints(boundary.headMessages);
 	const enginePins = extractContextEnginePins(boundary.headMessages);
+	const sessionIntent = extractSessionIntent(boundary.headMessages);
 
 	// 4. Summarize head
 	const systemPrompt = ctx?.model?.systemPrompt ?? ctx?.config?.systemPrompt ?? "";
@@ -382,6 +404,7 @@ export async function semanticFold(
 		skills,
 		constraints,
 		enginePins,
+		sessionIntent,
 	);
 
 	// 6. Persist fold state
@@ -402,6 +425,36 @@ export async function semanticFold(
 		tailMessages: boundary.tailMessages.length,
 		ctxAfterPct: ctxAfterRatio,
 	};
+}
+
+function textContent(content: unknown): string | undefined {
+	if (typeof content === "string") return content.trim() || undefined;
+	if (!Array.isArray(content)) return undefined;
+	const text = content
+		.map((part: any) => {
+			if (typeof part === "string") return part;
+			if (part?.type === "text" && typeof part.text === "string") return part.text;
+			return "";
+		})
+		.filter(Boolean)
+		.join(" ")
+		.replace(/\s+/g, " ")
+		.trim();
+	return text || undefined;
+}
+
+function clipOneLine(text: string, maxChars: number): string {
+	const single = text.replace(/\s+/g, " ").trim();
+	if (single.length <= maxChars) return single;
+	return `${single.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
+}
+
+function stripPinSyntax(text: string): string {
+	return text
+		.replace(/<[^>]+>/g, " ")
+		.replace(/^\s*#+\s*/gm, "")
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 /**

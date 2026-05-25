@@ -297,6 +297,26 @@ function formatPruneDetails(state: RuntimeState): string {
 		last: (impact.lastPostPruneMissCost ?? 0).toFixed(4),
 		hit: impact.lastPostPruneHitRate === undefined ? "n/a" : formatRatio(impact.lastPostPruneHitRate),
 	});
+	const regret = t(state.config, "status.pruneRegret", {
+		lookup: impact.postPruneLookupRegret ?? 0,
+		read: impact.postPruneReadRegret ?? 0,
+		foldRead: impact.postFoldReadRegret ?? 0,
+	});
+	const preserved = t(state.config, "status.prunePreservedDuringFlush", {
+		batches: impact.pendingBatchesPreservedDuringFlush ?? 0,
+		tools: impact.pendingToolCallsPreservedDuringFlush ?? 0,
+		lastBatches: impact.lastPendingBatchesPreservedDuringFlush ?? 0,
+		lastTools: impact.lastPendingToolCallsPreservedDuringFlush ?? 0,
+	});
+	const rebuild = impact.lastRebuildSourceMessages === undefined ? "" : `\n  ${t(state.config, "status.pruneRebuildImpact", {
+		source: impact.lastRebuildSourceMessages,
+		output: impact.lastRebuildOutputMessages ?? 0,
+		prunable: impact.lastRebuildPrunableIds ?? 0,
+		applied: impact.lastRebuildNewlyApplied ?? 0,
+		saved: formatTokenCount(impact.lastRebuildSavedApproxChars ?? 0),
+		checkpoint: impact.lastRebuildCheckpointOpened ? t(state.config, "status.yes") : t(state.config, "status.no"),
+		reason: impact.lastRebuildReason ?? t(state.config, "status.notReported"),
+	})}`;
 	const error = impact.lastError ? `\n  ${t(state.config, "status.pruneError", { error: impact.lastError })}` : "";
-	return `${base}\n  ${summary}\n  ${slice}\n  ${miss}${error}`;
+	return `${base}\n  ${summary}\n  ${slice}${rebuild}\n  ${miss}\n  ${regret}\n  ${preserved}${error}`;
 }

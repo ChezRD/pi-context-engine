@@ -4,7 +4,19 @@
  */
 import { actualCostUsd, deepSeekOfficialCost } from "../stats.ts";
 import { extractModelVisibleSection, isModelVisibleContext } from "../model-visible.ts";
+import {
+	CONTEXT_RESULT_LOOKUP_TOOL,
+	DUPLICATE_SKIP_INTERNAL_MARKER,
+	extractHarnessResultFacts,
+	firstContextResultLookupHeader,
+	isDuplicateSkipResult,
+	normalizeHarnessFactsForSummary,
+	stripLegacyUiContinuationHint,
+	type HarnessResultFacts,
+} from "./harness-content.ts";
 import type { ToolBatch, SummarizePoolResult, SummarizeResult, ToolPruneConfig } from "./types.ts";
+
+export { DUPLICATE_SKIP_INTERNAL_MARKER };
 
 export const DEFAULT_SUMMARIZER_SYSTEM_PROMPT = `You are rebuilding compact local context for tool-call batches made by an AI coding assistant.
 Return strict JSON only:
@@ -85,7 +97,6 @@ Write each summary as a short continuation fragment:
 - one line for unresolved risk or next step, only if needed`;
 
 const MAX_SUMMARY_RESULT_CHARS = 1200;
-export const DUPLICATE_SKIP_INTERNAL_MARKER = "[context-engine duplicate tool call skipped]";
 const MAX_ARGS_CHARS = 320;
 
 interface StructuredToolCallPayload {
@@ -261,16 +272,6 @@ function extractNormalizedResultMetadata(text: string): { metadata?: Record<stri
 	};
 }
 
-function splitUiContinuationHint(body: string | undefined): { body?: string; hasUiHint?: boolean } {
-	if (!body) return {};
-	const match = body.match(/\n(\[Showing lines [^\n]+\])\s*$/);
-	if (!match) return { body };
-	return {
-		body: body.slice(0, match.index).trimEnd() || undefined,
-		hasUiHint: true,
-	};
-}
-
 function neutralizeSliceContent(body: string | undefined): string | undefined {
 	if (!body) return body;
 	let next = body;
@@ -281,19 +282,19 @@ function neutralizeSliceContent(body: string | undefined): string | undefined {
 	return next;
 }
 
-function buildCoverageHints(toolName: string, args: string | undefined, result: string | undefined): string[] {
+function buildCoverageHints(toolName: string, args: string | undefined, result: string | undefined, facts?: HarnessResultFacts): string[] {
 	const hints = new Set<string>();
 	const source = `${toolName}\n${args ?? ""}\n${result ?? ""}`;
-	if (/context_result_lookup/i.test(toolName) || /\[context_result_lookup /i.test(result ?? "")) hints.add("lookup_slice");
+	if (toolName === CONTEXT_RESULT_LOOKUP_TOOL || facts?.ref) hints.add("lookup_slice");
 	if (/^read$/i.test(toolName) && /"offset"\s*:\s*\d+/i.test(args ?? "")) hints.add("read_slice");
 	if (/"offset"\s*:\s*[1-9]\d*/i.test(args ?? "")) hints.add("nonzero_offset");
 	if (/"limit"\s*:\s*\d+/i.test(args ?? "")) hints.add("explicit_limit");
-	if (/has_more=true/i.test(result ?? "")) hints.add("has_more_true");
-	if (/returned_chars=\d+/i.test(result ?? "") || /total_(chars|bytes)=\d+/i.test(result ?? "")) hints.add("slice_metadata_present");
+	if (facts?.hasMore === true) hints.add("has_more_true");
+	if (facts?.returnedChars !== undefined || facts?.totalChars !== undefined || facts?.totalBytes !== undefined) hints.add("slice_metadata_present");
 	if (/returned 0/i.test(source)) hints.add("zero_return");
 	if (/truncated|partial output/i.test(source)) hints.add("truncated_or_partial");
 	if (/full list not captured|never fetched|output was truncated|skipped intermediate|without shortcuts/i.test(source)) hints.add("narration_mentions_incomplete_or_claims");
-	if (/Use offset=\d+/i.test(result ?? "")) hints.add("continuation_hint");
+	if (facts?.continuation === "has-more") hints.add("continuation_hint");
 	return Array.from(hints);
 }
 
@@ -313,11 +314,14 @@ function buildStructuredToolCallPayload(toolCall: ToolBatch["toolCalls"][number]
 	const argsJson = tryParseArgs(toolCall.args);
 	const normalized = toolCall.result ? normalizeToolResultForSummary(toolCall.result) : "";
 	const { metadata, body } = normalized ? extractNormalizedResultMetadata(normalized) : {};
-	const { body: bodyWithoutUiHint, hasUiHint } = splitUiContinuationHint(body);
+	const facts = extractHarnessResultFacts(toolCall.result);
+	const { body: bodyWithoutUiHint, hasLegacyUiHint } = stripLegacyUiContinuationHint(body);
 	const toolName = String(toolCall.name ?? "unknown");
-	const coverageHints = buildCoverageHints(toolName, toolCall.args, toolCall.result);
+	const coverageHints = buildCoverageHints(toolName, toolCall.args, toolCall.result, facts);
 	const sourceRef = typeof metadata?.ref === "string"
 		? metadata.ref
+		: facts?.ref
+			? facts.ref
 		: typeof (argsJson as any)?.ref === "string"
 			? (argsJson as any).ref
 			: undefined;
@@ -347,7 +351,7 @@ function buildStructuredToolCallPayload(toolCall: ToolBatch["toolCalls"][number]
 		call_context: includeContext ? toolCall.context?.slice(0, 600) : undefined,
 		result_metadata: metadata,
 		result_excerpt: normalizedBody ? compactNormalizedResult(normalizedBody) : undefined,
-		has_ui_continuation_hint: hasUiHint,
+		has_ui_continuation_hint: hasLegacyUiHint,
 		context_kind: isLookupSlice ? "lookup-slice" : isReadSlice ? "read-slice" : "tool-result",
 		offset_kind: isLookupSlice || isReadSlice ? "char_slice" : metadata?.offset != null ? "unknown" : "n/a",
 		coverage_hints: coverageHints,
@@ -414,36 +418,23 @@ function stripLookupHeader(text: string): string {
 	return newline >= 0 ? text.slice(newline + 1).trimStart() : text.trim();
 }
 
-function isDuplicateSkipMarker(text: string): boolean {
-	const normalized = text.trim();
-	if (!normalized) return false;
-	if (normalized === DUPLICATE_SKIP_INTERNAL_MARKER) return true;
-	return [
-		/^duplicate tool call suppressed to avoid cache\/context churn$/i,
-		/^дублирующийся вызов инструмента пропущен во избежание кэш-инвалидации\/шума в контексте$/i,
-	].some((pattern) => pattern.test(normalized));
-}
-
-function firstLookupHeader(text: string): string | undefined {
-	const firstLine = text.trimStart().split(/\r?\n/, 1)[0]?.trim();
-	return firstLine?.startsWith("[context_result_lookup ") ? firstLine : undefined;
-}
-
 function normalizeLookupMetadata(header: string): string {
-	return header
-		.replace(/^\[context_result_lookup\s*/, "")
-		.replace(/\]$/, "")
-		.replace(/\breturned=/g, "returned_chars=")
-		.replace(/\bbytes=/g, "total_bytes=")
-		.trim();
+	const facts = extractHarnessResultFacts(header);
+	return normalizeHarnessFactsForSummary(facts)
+		?? header
+			.replace(/^\[context_result_lookup\s*/, "")
+			.replace(/\]$/, "")
+			.replace(/\breturned=/g, "returned_chars=")
+			.replace(/\bbytes=/g, "total_bytes=")
+			.trim();
 }
 
 export function normalizeToolResultForSummary(text: string): string {
 	const trimmed = text.trim();
 	if (!trimmed) return trimmed;
-	if (isDuplicateSkipMarker(trimmed)) return "";
+	if (isDuplicateSkipResult(trimmed)) return "";
 	if (!isModelVisibleContext(trimmed)) {
-		const header = firstLookupHeader(trimmed);
+		const header = firstContextResultLookupHeader(trimmed);
 		const body = stripLookupHeader(trimmed);
 		if (!header) return trimmed;
 		const normalizedHeader = normalizeLookupMetadata(header);
@@ -451,7 +442,7 @@ export function normalizeToolResultForSummary(text: string): string {
 		return body && !bodyLooksLikeSameHeader ? `Result metadata: ${normalizedHeader}\n${body}` : `Result metadata: ${normalizedHeader}`;
 	}
 	const lookup = extractModelVisibleSection(trimmed, "lookup");
-	const metadata = lookup ? firstLookupHeader(lookup) : undefined;
+	const metadata = lookup ? firstContextResultLookupHeader(lookup) : undefined;
 	if (lookup) {
 		const normalizedLookup = stripLookupHeader(lookup).trim();
 		if (normalizedLookup && !normalizedLookup.startsWith("[context_result_lookup ")) {
@@ -481,6 +472,37 @@ export function isReplacementSummaryEfficient(batch: ToolBatch, summaryText: str
 	const replacementChars = estimateBatchReplacementChars(batch);
 	if (replacementChars <= 0) return false;
 	return summaryText.trim().length <= replacementChars;
+}
+
+export function buildObservationMaskSummary(batch: ToolBatch, reason = "summary unavailable"): string {
+	const lines = [
+		"Coverage: unknown",
+		`Tool output masked without LLM summary (${reason}).`,
+	];
+	for (const toolCall of batch.toolCalls.slice(0, 8)) {
+		const args = tryParseArgs(toolCall.args) as any;
+		const facts = extractHarnessResultFacts(toolCall.result);
+		const parts = [`Tool: ${toolCall.name}`];
+		if (typeof args?.path === "string") parts.push(`path=${args.path}`);
+		if (typeof args?.ref === "string") parts.push(`arg_ref=${args.ref}`);
+		if (facts?.ref) parts.push(`ref=${facts.ref}`);
+		const offset = facts?.offset ?? (typeof args?.offset === "number" ? args.offset : undefined);
+		const limit = facts?.limit ?? (typeof args?.limit === "number" ? args.limit : undefined);
+		if (offset !== undefined) parts.push(`offset=${offset}`);
+		if (limit !== undefined) parts.push(`limit=${limit}`);
+		if (facts?.returnedChars !== undefined) parts.push(`returned_chars=${facts.returnedChars}`);
+		if (facts?.totalChars !== undefined) parts.push(`total_chars=${facts.totalChars}`);
+		if (facts?.totalBytes !== undefined) parts.push(`total_bytes=${facts.totalBytes}`);
+		if (facts?.hasMore !== undefined) parts.push(`has_more=${facts.hasMore ? "true" : "false"}`);
+		lines.push(`- ${parts.join(", ")}.`);
+	}
+	if (batch.toolCalls.length > 8) lines.push(`- ${batch.toolCalls.length - 8} additional tool calls masked.`);
+	lines.push("Raw output omitted; content facts are not verified from masked output.");
+	return lines.join("\n");
+}
+
+function observationMaskResults(batches: ToolBatch[], reason: string): SummarizeResult[] {
+	return batches.map((batch) => ({ summaryText: buildObservationMaskSummary(batch, reason) }));
 }
 
 function summaryTokenBudgetForBatches(batches: ToolBatch[]): number {
@@ -583,6 +605,10 @@ function resolveModel(config: ToolPruneConfig): string | undefined {
 
 function emptyDebug(prompt: string, maxTokens: number, responseText = ""): SummarizePoolResult["debug"] {
 	return { prompt, responseText, maxTokens, acceptedSummaries: [] };
+}
+
+function maskDebug(prompt: string, maxTokens: number, summaries: SummarizeResult[], responseText = ""): NonNullable<SummarizePoolResult["debug"]> {
+	return { prompt, responseText, maxTokens, acceptedSummaries: summaries.map((item) => item.summaryText) };
 }
 
 async function resolvePiAiModel(modelId: string | undefined, ctx: any): Promise<any | undefined> {
@@ -779,21 +805,25 @@ export async function summarizeToolBatchPool(
 			response = await pi.complete(model, [{ role: "user", content: userMessage }], { maxTokens, signal: combinedSignal, reasoningEffort: undefined });
 		} else {
 			const completed = await completeWithPiAi(model, userMessage, { ctx: opts?.ctx, signal: combinedSignal, maxTokens, reasoningEffort: "off" });
-			if (completed.error) return { results: batches.map(() => null), metrics: { ...emptyMetrics, error: completed.error }, debug: emptyDebug(userMessage, maxTokens) };
+			if (completed.error) return { results: observationMaskResults(batches, completed.error), metrics: { ...emptyMetrics, error: completed.error, summaryChars: observationMaskResults(batches, completed.error).reduce((sum, item) => sum + item.summaryText.length, 0) }, debug: emptyDebug(userMessage, maxTokens) };
 			response = completed.response;
 			resolvedModelId = completed.modelId ?? model;
 		}
 
-		if (!response) return { results: batches.map(() => null), metrics: { ...emptyMetrics, requests: 1, inputTokens: estimateTokens(userMessage), error: "summary model returned no response" }, debug: emptyDebug(userMessage, maxTokens) };
+		if (!response) {
+			const masked = observationMaskResults(batches, "summary model returned no response");
+			return { results: masked, metrics: { ...emptyMetrics, requests: 1, inputTokens: estimateTokens(userMessage), summaryChars: masked.reduce((sum, item) => sum + item.summaryText.length, 0), error: "summary model returned no response" }, debug: maskDebug(userMessage, maxTokens, masked) };
+		}
 		const text = responseContentText(response);
 		if (!text || text.trim().length === 0) {
 			const usage = readUsage(response, userMessage, text ?? "");
 			const pricing = deepSeekOfficialCost(model);
 			const cost = actualCostUsd({ input: usage.input, cacheRead: usage.cacheRead ?? 0, cacheWrite: 0, output: 0, cost: response?.usage?.cost?.total ?? response?.usage?.cost }, pricing);
+			const masked = observationMaskResults(batches, "summary response was empty");
 			return {
-				results: batches.map(() => null),
-				metrics: { ...emptyMetrics, requests: 1, inputTokens: usage.input, outputTokens: 0, cacheReadTokens: usage.cacheRead ?? 0, cost, modelId: resolvedModelId, error: "summary response was empty" },
-				debug: emptyDebug(userMessage, maxTokens, text ?? ""),
+				results: masked,
+				metrics: { ...emptyMetrics, requests: 1, inputTokens: usage.input, outputTokens: 0, cacheReadTokens: usage.cacheRead ?? 0, cost, modelId: resolvedModelId, summaryChars: masked.reduce((sum, item) => sum + item.summaryText.length, 0), error: "summary response was empty" },
+				debug: maskDebug(userMessage, maxTokens, masked, text ?? ""),
 			};
 		}
 
@@ -842,7 +872,7 @@ export async function summarizeToolBatchPool(
 			? results
 			: batches.length === 1 && text.trim() && !looksLikeStructuredJsonAttempt(text)
 				? [{ summaryText: text.trim(), usage }]
-				: batches.map(() => null);
+				: observationMaskResults(batches, "summary response did not contain usable structured summaries");
 
 		if (!opts?.qualityRetry) {
 			const invalidIndexes = failSoftResults
@@ -910,7 +940,8 @@ export async function summarizeToolBatchPool(
 		};
 	} catch (err: any) {
 		const message = err?.name === "AbortError" || err?.name === "TimeoutError" ? err.name : (err?.message ?? String(err));
-		return { results: batches.map(() => null), metrics: { ...emptyMetrics, error: message }, debug: emptyDebug(userMessage, maxTokens) };
+		const masked = observationMaskResults(batches, message);
+		return { results: masked, metrics: { ...emptyMetrics, summaryChars: masked.reduce((sum, item) => sum + item.summaryText.length, 0), error: message }, debug: maskDebug(userMessage, maxTokens, masked) };
 	}
 }
 

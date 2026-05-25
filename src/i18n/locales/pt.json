@@ -76,6 +76,59 @@
   "engine.zone.orange": "laranja",
   "engine.zone.red": "vermelho",
   "engine.zone.yellow": "amarelo",
+  "intent.actionVerbs": [
+    "call",
+    "invoke",
+    "run",
+    "use",
+    "execute"
+  ],
+  "intent.explanationMarkers": [
+    "example",
+    "schema",
+    "parameters",
+    "syntax"
+  ],
+  "intent.futureMarkers": [
+    "now",
+    "next",
+    "then",
+    "will"
+  ],
+  "intent.toolNouns": [
+    "tool",
+    "function"
+  ],
+  "intent.user.analyzeWords": [
+    "analyze",
+    "analyse",
+    "inspect",
+    "audit",
+    "review",
+    "diagnose",
+    "debug",
+    "study",
+    "investigate"
+  ],
+  "intent.user.pruneWords": [
+    "prune",
+    "compact",
+    "compress",
+    "summarize",
+    "summarise",
+    "pruning"
+  ],
+  "intent.user.searchWords": [
+    "search",
+    "find",
+    "locate",
+    "lookup",
+    "look up",
+    "grep",
+    "scan",
+    "browse",
+    "trace"
+  ],
   "payload.assistantMessages": "Mensagens do assistente: {count}",
   "payload.includeUsage": "Utilização streaming pedida: {value}",
   "payload.messages": "Mensagens enviadas: {count}",
@@ -181,6 +234,9 @@
   "status.pruneNext.off": "desligado",
   "status.pruneNext.toolBatch": "com lote tools",
   "status.pruneNext.turns": "em {turns} respostas",
+  "status.prunePreservedDuringFlush": "Preservados durante flush: {batches} lotes · {tools} chamadas de ferramenta · último {lastBatches}/{lastTools}",
+  "status.pruneRebuildImpact": "Reconstrução: {source} -> {output} mensagens · removíveis {prunable} · aplicados {applied} · economia ~{saved} · ponto de controle {checkpoint} · {reason}",
+  "status.pruneRegret": "Releituras após compressão: lookup {lookup} · read {read} · fold-read {foldRead}",
   "status.prunerNotDetected": "pi-context-prune não detetado",
   "status.pruneSliceImpact": "Slice de limpeza: {raw} -> {summary} · poupado {delta} · último {lastRaw} -> {lastSummary}",
   "status.pruneSummaryImpact": "Custo do resumo de limpeza: {requests} pedidos · {tokens} tokens · ${cost} total · ${last} último",
@@ -334,7 +390,10 @@
   "ui.dashboard.pruneMode": "modo",
   "ui.dashboard.pruneNext": "próximo",
   "ui.dashboard.prunePending": "pendente",
+  "ui.dashboard.prunePreservedDuringFlush": "preservados durante flush {batches} lotes · {tools} ferramentas · último {lastBatches}/{lastTools}",
   "ui.dashboard.pruneProgress": "progresso {progress} até limite {target}",
+  "ui.dashboard.pruneRebuildImpact": "reconstrução {source}->{output} msgs · removíveis {prunable} · aplicados {applied} · economia ~{saved} · ponto de controle {checkpoint}",
+  "ui.dashboard.pruneRegret": "releituras lookup {lookup} · read {read} · fold-read {foldRead}",
   "ui.dashboard.pruneSliceImpact": "slice substituído {raw} -> {summary} · poupado {delta} · último {lastRaw} -> {lastSummary}",
   "ui.dashboard.pruneSummarized": "resumido",
   "ui.dashboard.pruneSummaryImpact": "pedidos de resumo {requests} · tokens {tokens} · custo {cost} · último {last}",

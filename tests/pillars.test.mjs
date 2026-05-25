@@ -206,13 +206,14 @@ describe("summarizeToolBatch", () => {
 		assert.equal(normalizeToolResultForSummary("Дублирующийся вызов инструмента пропущен во избежание кэш-инвалидации/шума в контексте"), "");
 	});
 
-	it("returns null when pi has no complete function", async () => {
+	it("returns an observation mask when pi has no complete function", async () => {
 		const result = await summarizeToolBatch(
 			{},
 			{ turnIndex: 0, toolCalls: [{ id: "t1", name: "read", result: "data" }] },
 			{ enabled: true, pruneOn: "every-turn", summarizerModel: "default" },
 		);
-		assert.equal(result, null);
+		assert.match(result.summaryText, /Tool output masked/);
+		assert.match(result.summaryText, /summary model not found/);
 	});
 
 	it("accepts common structured summary field variants", async () => {
@@ -500,7 +501,7 @@ describe("summarizeToolBatch", () => {
 
 	it("normalizes legacy lookup headers to explicit returned_chars and total_bytes names", () => {
 		const normalized = normalizeToolResultForSummary("[context_result_lookup ref=dsc-bash-a offset=12000 limit=700 returned=0 bytes=12666]\n");
-		assert.equal(normalized, "Result metadata: ref=dsc-bash-a offset=12000 limit=700 returned_chars=0 total_bytes=12666");
+		assert.equal(normalized, "Result metadata: kind=slice ref=dsc-bash-a offset=12000 limit=700 returned_chars=0 total_bytes=12666");
 	});
 
 	it("compacts oversized bash heredoc args while preserving target path hints", async () => {

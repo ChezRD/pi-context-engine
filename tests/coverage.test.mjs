@@ -24,6 +24,7 @@ try {
 	m.estimateFoldBoundary = (await import("../src/projection/history-folder.ts")).estimateFoldBoundary;
 	m.extractPinnedSkills = (await import("../src/projection/history-folder.ts")).extractPinnedSkills;
 	m.extractPinnedConstraints = (await import("../src/projection/history-folder.ts")).extractPinnedConstraints;
+	m.extractSessionIntent = (await import("../src/projection/history-folder.ts")).extractSessionIntent;
 	m.buildFoldMessage = (await import("../src/projection/history-folder.ts")).buildFoldMessage;
 	m.trimTrailingAssistantToolCalls = (await import("../src/projection/history-folder.ts")).trimTrailingAssistantToolCalls;
 	m.isFoldValid = (await import("../src/projection/history-folder.ts")).isFoldValid;
@@ -115,6 +116,7 @@ try {
 	m.rebuildPrunedContext = (await import("../src/projection/rebuild.ts")).rebuildPrunedContext;
 	m.rebuildPrunedContextFromSession = (await import("../src/projection/rebuild.ts")).rebuildPrunedContextFromSession;
 	m.buildSessionContentMap = (await import("../src/projection/session-map.ts")).buildSessionContentMap;
+	m.validateSessionPruneSuggestion = (await import("../src/projection/session-map.ts")).validateSessionPruneSuggestion;
 	m.PinStore = (await import("../src/context-pins/store.ts")).PinStore;
 	m.computeStablePinHash = (await import("../src/context-pins/store.ts")).computeStableHash;
 	m.computePinSetHash = (await import("../src/context-pins/store.ts")).computePinSetHash;
@@ -242,9 +244,11 @@ describe("extractPinnedConstraints", () => {
 
 describe("buildFoldMessage", () => {
 	it("includes marker, skills, constraints", () => {
-		const msg = m.buildFoldMessage("<m>", "summary text", [{ id: "s1", content: "<skill-pin name=\"s1\">\nc\n</skill-pin>" }], ["[HIGH PRIORITY] urgent"]);
+		const msg = m.buildFoldMessage("<m>", "summary text", [{ id: "s1", content: "<skill-pin name=\"s1\">\nc\n</skill-pin>" }], ["[HIGH PRIORITY] urgent"], [], "Initial user goal: prune safely");
 		assert.ok(msg.content.includes("<m>"));
 		assert.ok(msg.content.includes("summary text"));
+		assert.ok(msg.content.includes("Session intent"));
+		assert.ok(msg.content.includes("prune safely"));
 		assert.ok(msg.content.includes("skill-pin"));
 		assert.ok(msg.content.includes("HIGH PRIORITY"));
 		assert.equal(msg.role, "assistant");
@@ -256,6 +260,19 @@ describe("buildFoldMessage", () => {
 	it("omits constraints when empty", () => {
 		const msg = m.buildFoldMessage("<m>", "s", [], []);
 		assert.ok(!msg.content.includes("HIGH PRIORITY"));
+	});
+});
+
+describe("extractSessionIntent", () => {
+	it("extracts first user goal and explicit constraints deterministically", () => {
+		const intent = m.extractSessionIntent([
+			{ role: "assistant", content: "hello" },
+			{ role: "user", content: "Keep prune cheap and auditable." },
+			{ role: "user", content: "[Project memory] prefer deterministic metadata" },
+		], 240);
+		assert.match(intent, /Initial user goal: Keep prune cheap/);
+		assert.match(intent, /Constraint: \[Project memory\] prefer deterministic metadata/);
+		assert.ok(intent.length <= 240);
 	});
 });
 
@@ -721,8 +738,10 @@ describe("pruneMessages", () => {
 // ── summarizeToolBatch ──
 
 describe("summarizeToolBatch", () => {
-	it("returns null when pi has no complete function", async () => {
-		assert.equal(await m.summarizeToolBatch({}, { turnIndex: 0, toolCalls: [{ id: "t1", name: "read", result: "data" }] }, { enabled: true, pruneOn: "every-turn", summarizerModel: "default" }), null);
+	it("returns an observation mask when pi has no complete function", async () => {
+		const result = await m.summarizeToolBatch({}, { turnIndex: 0, toolCalls: [{ id: "t1", name: "read", result: "data" }] }, { enabled: true, pruneOn: "every-turn", summarizerModel: "default" });
+		assert.match(result.summaryText, /Coverage: unknown/);
+		assert.match(result.summaryText, /Tool output masked/);
 	});
 });
 
@@ -838,6 +857,15 @@ describe("showDashboard", () => {
 		state.engine.prune.impact.postPruneCacheReadTokens = 50;
 		state.engine.prune.impact.lastPostPruneMissTokens = 10;
 		state.engine.prune.impact.lastPostPruneHitRate = 0.9;
+		state.engine.prune.impact.postPruneLookupRegret = 2;
+		state.engine.prune.impact.postPruneReadRegret = 1;
+		state.engine.prune.impact.postFoldReadRegret = 3;
+		state.engine.prune.impact.lastRebuildSourceMessages = 5;
+		state.engine.prune.impact.lastRebuildOutputMessages = 3;
+		state.engine.prune.impact.lastRebuildPrunableIds = 1;
+		state.engine.prune.impact.lastRebuildNewlyApplied = 1;
+		state.engine.prune.impact.lastRebuildSavedApproxChars = 1800;
+		state.engine.prune.impact.lastRebuildCheckpointOpened = true;
 		state.engine.prune.impact.summarizeByModel = [{
 			modelId: "deepseek-v4-flash",
 			provider: "deepseek",
@@ -900,7 +928,8 @@ describe("showDashboard", () => {
 		assert.match(rendered, /Cache statistics/);
 		assert.match(rendered, /Prune:/);
 		assert.match(rendered, /replacement slice 2k -> 200/);
-		assert.match(rendered, /Models in session:/);
+		assert.match(rendered, /rebuild 5->3 msgs/);
+		assert.match(rendered, /regret lookup 2 · read 1 · fold-read 3/);
 		assert.doesNotMatch(rendered, /x{100,}/);
 	});
 
@@ -2096,6 +2125,46 @@ describe("auto-compact", () => {
 		assert.equal(state.engine.prune.pendingBatches.length, 1);
 		assert.equal(state.engine.prune.pendingBatches[0].toolCalls[0].id, "tc-second");
 		assert.equal(state.engine.prune.awaitingAgentMessage, true);
+		assert.equal(state.engine.prune.impact.pendingBatchesPreservedDuringFlush, 1);
+		assert.equal(state.engine.prune.impact.pendingToolCallsPreservedDuringFlush, 1);
+		assert.equal(state.engine.prune.impact.lastPendingBatchesPreservedDuringFlush, 1);
+		assert.equal(state.engine.prune.impact.lastPendingToolCallsPreservedDuringFlush, 1);
+	});
+
+	it("handleAgentMessagePrune snapshots flushing batches and removes only flushed tool call ids", async () => {
+		const state = makeState();
+		Object.assign(state.config, { pruneOn: "agent-message", pruneBatchSize: 1 });
+		state.engine.turnIndex = 5;
+		state.engine.prune.batchStepCounter = 1;
+		state.engine.prune.pendingBatches = [{
+			turnIndex: 0,
+			context: "read src/first.ts",
+			toolCalls: [{ id: "tc-first", name: "read", turnIndex: 0, args: "{\"path\":\"src/first.ts\"}", result: "export const first = true;\n".repeat(80) }],
+		}];
+		const pi = {
+			complete: async () => {
+				state.engine.prune.pendingBatches[0].toolCalls.push({
+					id: "tc-second",
+					name: "read",
+					turnIndex: 1,
+					args: "{\"path\":\"src/second.ts\"}",
+					result: "export const second = true;\n".repeat(80),
+				});
+				return {
+					content: "{\"summaries\":[{\"batchIndex\":0,\"coverage\":\"complete\",\"summary\":\"Read src/first.ts; first export confirmed.\"}]}",
+					usage: { input: 100, output: 20, cacheRead: 0 },
+				};
+			},
+		};
+
+		await m.handleAgentMessagePrune(pi, { ui: { notify: () => {} } }, state, { message: { role: "assistant", content: "done" } });
+
+		assert.equal(state.engine.prune.pendingBatches.length, 1);
+		assert.deepEqual(state.engine.prune.pendingBatches[0].toolCalls.map((tc) => tc.id), ["tc-second"]);
+		assert.equal(state.engine.prune.summarizedIds.includes("tc-first"), true);
+		assert.equal(state.engine.prune.summarizedIds.includes("tc-second"), false);
+		assert.equal(state.engine.prune.impact.pendingBatchesPreservedDuringFlush, 1);
+		assert.equal(state.engine.prune.impact.pendingToolCallsPreservedDuringFlush, 1);
 	});
 
 	it("handleTurnEnd returns early when the extension is disabled", async () => {
@@ -2181,6 +2250,39 @@ describe("auto-compact", () => {
 
 		assert.equal(compactCalls, 0);
 		assert.equal(result, undefined);
+	});
+
+	it("lifecycle handleBeforeProviderRequest injects one gated intent nudge for pending tool intent", async () => {
+		const state = makeState();
+		Object.assign(state.config, {
+			toolIntentNudge: true,
+			toolIntentNudgeMinConfidence: "medium",
+			toolIntentNudgeMaxChars: 500,
+		});
+		state.engine.turnIndex = 4;
+
+		await m.lifecycleHandleMessageEnd(
+			{ message: { role: "assistant", content: "I will call read now." } },
+			{},
+			{},
+			state,
+		);
+
+		assert.equal(state.engine.toolIntent.pending.length, 1);
+
+		const event = { messages: [{ role: "system", content: "base" }, { role: "user", content: "inspect file" }] };
+		m.lifecycleHandleBeforeProviderRequest(event, { session: { id: "session-a" } }, state);
+
+		assert.equal(event.messages.length, 3);
+		assert.equal(event.messages[2].role, "system");
+		assert.match(event.messages[2].content, /\[pi-context-engine intent nudge\]/);
+		assert.match(event.messages[2].content, /Detected pending tool intent: imminent-tool-call/);
+		assert.equal(state.engine.toolIntent.stats.nudges, 1);
+
+		const retry = { messages: [{ role: "system", content: "base" }] };
+		m.lifecycleHandleBeforeProviderRequest(retry, { session: { id: "session-a" } }, state);
+		assert.equal(retry.messages.length, 1);
+		assert.equal(state.engine.toolIntent.stats.nudges, 1);
 	});
 
 	it("lifecycle handleMessageEnd flushes agent-message prune when event is the assistant message itself", async () => {
@@ -2534,6 +2636,15 @@ describe("projection/rebuild", () => {
 		assert.equal(rebuild.messages.length, 2);
 		assert.equal(rebuild.messages[0].role, "assistant");
 		assert.deepEqual(rebuild.messages[0].content, [{ type: "text", text: "summary text" }]);
+		assert.equal(rebuild.sourceMessages, 3);
+		assert.equal(rebuild.outputMessages, 2);
+		assert.equal(rebuild.savedApproxChars > 0, true);
+		assert.equal(state.engine.prune.impact.lastRebuildSourceMessages, 3);
+		assert.equal(state.engine.prune.impact.lastRebuildOutputMessages, 2);
+		assert.equal(state.engine.prune.impact.lastRebuildPrunableIds, 1);
+		assert.equal(state.engine.prune.impact.lastRebuildNewlyApplied, 1);
+		assert.equal(state.engine.prune.impact.lastRebuildCheckpointOpened, true);
+		assert.equal(state.engine.prune.impact.lastRebuildReason, "manual prune");
 	});
 
 	it("rebuildPrunedContext is idempotent once summarized ids were already applied", () => {
@@ -2613,6 +2724,11 @@ describe("projection/session-map", () => {
 		assert.ok(map.segments.some((segment) => segment.kind === "dialogue" && !segment.dropCandidate));
 		assert.ok(map.segments.some((segment) => segment.kind === "summary" && !segment.dropCandidate));
 		assert.ok(map.segments.some((segment) => segment.kind === "tool-batch" && segment.dropCandidate));
+		const toolSegment = map.segments.find((segment) => segment.kind === "tool-batch");
+		assert.equal(toolSegment?.risk, "low");
+		assert.deepEqual(toolSegment?.facts?.refs, ["dsc-1"]);
+		assert.equal(toolSegment?.facts?.hasUnfetchedTail, false);
+		assert.match(toolSegment?.summary ?? "", /context_result_lookup dsc-1/);
 
 		const user = map.nodes.find((node) => node.role === "user");
 		assert.equal(user?.textPreview, "inspect locales");
@@ -2621,8 +2737,12 @@ describe("projection/session-map", () => {
 		assert.equal(call?.ref, "dsc-1");
 		assert.equal(call?.offset, 12);
 		assert.equal(call?.limit, 34);
+		assert.equal(call?.argsHash, m.stableHash("{\"ref\":\"dsc-1\",\"offset\":12,\"limit\":34}"));
+		assert.equal(call?.contentHash, m.stableHash({ name: "context_result_lookup", args: "{\"ref\":\"dsc-1\",\"offset\":12,\"limit\":34}" }));
 		assert.equal(result?.parentNodeId, call?.id);
 		assert.equal(result?.ref, "dsc-1");
+		assert.equal(result?.resultHash, m.stableHash("slice data"));
+		assert.equal(result?.contentHash, m.stableHash({ content: "slice data", result: undefined }));
 	});
 
 	it("keeps malformed lookup args unparsed and keeps mixed summarized batches non-droppable", () => {
@@ -2649,6 +2769,35 @@ describe("projection/session-map", () => {
 		assert.equal(readResult?.textPreview, "read body");
 		const batch = map.segments.find((segment) => segment.kind === "tool-batch");
 		assert.equal(batch?.dropCandidate, false);
+	});
+
+	it("validates advisory model-directed prune suggestions without allowing unsafe drops", () => {
+		const state = m.createRuntimeState();
+		state.toolIndexer.markSummarized("lookup-1", "context_result_lookup", 1, "summary");
+		const map = m.buildSessionContentMap([
+			{ id: "u1", type: "message", turnIndex: 0, message: { role: "user", content: "inspect old output" } },
+			{ id: "a1", type: "message", turnIndex: 1, message: { role: "assistant", content: "reading", tool_calls: [{ id: "lookup-1", function: { name: "context_result_lookup", arguments: "{\"ref\":\"dsc-old\",\"offset\":0,\"limit\":10}" } }] } },
+			{ id: "t1", type: "message", turnIndex: 1, message: { role: "tool", toolCallId: "lookup-1", toolName: "context_result_lookup", content: "[context_result_lookup kind=slice ref=dsc-old offset=0 limit=10 returned_chars=10 total_chars=10 bytes=10 has_more=false]\nold slice" } },
+			{ id: "u2", type: "message", turnIndex: 2, message: { role: "user", content: "continue" } },
+			{ id: "a2", type: "message", turnIndex: 3, message: { role: "assistant", content: "fresh", tool_calls: [{ id: "read-1", function: { name: "read", arguments: "{\"path\":\"src/new.ts\"}" } }] } },
+			{ id: "t2", type: "message", turnIndex: 3, message: { role: "tool", toolCallId: "read-1", toolName: "read", result: "fresh body" } },
+		], state);
+
+		const oldToolSegment = map.segments.find((segment) => segment.kind === "tool-batch" && segment.facts?.refs.includes("dsc-old"));
+		const currentToolSegment = map.segments.find((segment) => segment.kind === "tool-batch" && segment.facts?.paths.includes("src/new.ts"));
+		const userSegment = map.segments.find((segment) => segment.kind === "dialogue" && segment.nodeIds.some((id) => map.nodes.find((node) => node.id === id)?.role === "user"));
+
+		assert.equal(oldToolSegment?.dropCandidate, true);
+		assert.equal(currentToolSegment?.dropCandidate, false);
+		assert.equal(currentToolSegment?.risk, "high");
+
+		const validation = m.validateSessionPruneSuggestion(map, {
+			dropSegmentIds: [oldToolSegment.id, currentToolSegment.id, userSegment.id, "missing"],
+			reason: "model says old work is redundant",
+		});
+
+		assert.deepEqual(validation.acceptedSegmentIds, [oldToolSegment.id]);
+		assert.deepEqual(validation.rejected.map((item) => item.reason), ["current-tail", "contains-user-message", "unknown-segment"]);
 	});
 });
 
@@ -2810,6 +2959,13 @@ describe("status output", () => {
 		state.engine.prune.impact.lastPostPruneMissTokens = 50;
 		state.engine.prune.impact.lastPostPruneMissCost = 0.0004;
 		state.engine.prune.impact.lastPostPruneHitRate = 0.95;
+		state.engine.prune.impact.lastRebuildSourceMessages = 5;
+		state.engine.prune.impact.lastRebuildOutputMessages = 3;
+		state.engine.prune.impact.lastRebuildPrunableIds = 2;
+		state.engine.prune.impact.lastRebuildNewlyApplied = 1;
+		state.engine.prune.impact.lastRebuildSavedApproxChars = 1800;
+		state.engine.prune.impact.lastRebuildCheckpointOpened = true;
+		state.engine.prune.impact.lastRebuildReason = "auto test";
 		state.engine.prune.impact.lastError = "previous summary failed";
 		return state;
 	}
@@ -2826,6 +2982,7 @@ describe("status output", () => {
 		assert.match(status, /mode agent-message/);
 		assert.match(status, /progress 1\/2/);
 		assert.match(status, /Prune summary cost: 2 requests/);
+		assert.match(status, /Rebuild: 5 -> 3 messages/);
 		assert.match(status, /previous summary failed/);
 		assert.match(status, /abcdef123456/);
 		assert.match(status, /99%/);
@@ -2843,6 +3000,7 @@ describe("status output", () => {
 		assert.match(details, /manual@3:failed/);
 		assert.match(details, /Checkpoints/);
 		assert.match(details, /Prune summary cost: 2 requests/);
+		assert.match(details, /auto test/);
 	});
 
 	it("formatPruneSummarizerTrace reports uncaptured and captured diagnostics", () => {
@@ -2971,11 +3129,11 @@ describe("summarizeToolBatch edge cases", () => {
     assert.equal(m.normalizeToolResultForSummary("[context-engine duplicate tool call skipped]"), "");
     assert.equal(
       m.normalizeToolResultForSummary("[context_result_lookup ref=dsc-1 offset=0 limit=5 returned=5 bytes=10]\nhello"),
-      "Result metadata: ref=dsc-1 offset=0 limit=5 returned_chars=5 total_bytes=10\nhello",
+      "Result metadata: kind=slice ref=dsc-1 offset=0 limit=5 returned_chars=5 total_bytes=10\nhello",
     );
     assert.equal(
       m.normalizeToolResultForSummary("[context_result_lookup ref=dsc-1 offset=0 limit=5 returned=5 bytes=10]\n[context_result_lookup ref=dsc-1 offset=0 limit=5 returned=5 bytes=10]"),
-      "Result metadata: ref=dsc-1 offset=0 limit=5 returned_chars=5 total_bytes=10",
+      "Result metadata: kind=slice ref=dsc-1 offset=0 limit=5 returned_chars=5 total_bytes=10",
     );
   });
 
@@ -3012,7 +3170,8 @@ describe("summarizeToolBatch edge cases", () => {
       [{ turnIndex: 0, toolCalls: [{ id: "t1", name: "read", result: "data" }] }],
       { enabled: true, pruneOn: "every-turn", summarizerModel: "deepseek-v4-flash" },
     );
-    assert.equal(empty.results[0], null);
+    assert.match(empty.results[0].summaryText, /summary response was empty/);
+    assert.match(empty.results[0].summaryText, /Coverage: unknown/);
     assert.equal(empty.metrics.requests, 1);
     assert.equal(empty.metrics.error, "summary response was empty");
     assert.equal(empty.metrics.cacheReadTokens, 3);
@@ -3022,7 +3181,7 @@ describe("summarizeToolBatch edge cases", () => {
       [{ turnIndex: 0, toolCalls: [{ id: "t1", name: "read", result: "data" }] }],
       { enabled: true, pruneOn: "every-turn", summarizerModel: "default" },
     );
-    assert.equal(missing.results[0], null);
+    assert.match(missing.results[0].summaryText, /summary model returned no response/);
     assert.equal(missing.metrics.requests, 1);
     assert.equal(missing.metrics.error, "summary model returned no response");
   });
@@ -3034,7 +3193,7 @@ describe("summarizeToolBatch edge cases", () => {
         [{ turnIndex: 0, toolCalls: [{ id: "t1", name: "read", result: "data" }] }],
         { enabled: true, pruneOn: "every-turn", summarizerModel: "default" },
       );
-      assert.equal(pool.results[0], null);
+      assert.match(pool.results[0].summaryText, new RegExp(name));
       assert.equal(pool.metrics.requests, 0);
       assert.equal(pool.metrics.error, name);
     }
@@ -3057,7 +3216,7 @@ describe("summarizeToolBatch edge cases", () => {
       [{ turnIndex: 0, toolCalls: [{ id: "t1", name: "read", result: "data" }] }],
       { enabled: true, pruneOn: "every-turn", summarizerModel: "default" },
     );
-    assert.equal(pool.results[0], null);
+    assert.match(pool.results[0].summaryText, /Tool output masked/);
     assert.equal(pool.metrics.error, "summary response did not contain usable structured summaries");
   });
 

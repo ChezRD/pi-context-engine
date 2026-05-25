@@ -6,7 +6,7 @@ import { handleAgentMessagePrune, handleTurnEnd as decideAtTurnEnd, requestFold 
 import { handleProviderPrefix } from "./prefix-fingerprint.ts";
 import { handleSessionBeforeCompact as beforeCompact } from "./custom-compaction.ts";
 import { activateAppendOnlyProjectionFromCompact, applyAppendOnlyProjection } from "./append-only-projection.ts";
-import { detectTextualToolCall, handleToolCall as toolCall } from "./tool-stability.ts";
+import { handleAssistantMessageIntent, handleUserIntent, maybeInjectToolIntentNudge, handleToolCall as toolCall } from "./tool-stability.ts";
 import { rebuildPrunedContext } from "../projection/rebuild.ts";
 export { holdCompaction, requestCompact, requestFold } from "./auto-compact.ts";
 export { registerFoldTool } from "./fold-tool.ts";
@@ -15,9 +15,12 @@ export { diffPrefix, extractCachePrefix, handleProviderPrefix, normalizeTools, s
 export { annotateUsageForCurrentSegment, currentCacheSegment, handlePrefixCheckpoint, openCacheCheckpoint } from "./cache-checkpoints.ts";
 export { activateAppendOnlyProjectionFromCompact, applyAppendOnlyProjection } from "./append-only-projection.ts";
 export { detectTextualToolCall } from "./tool-stability.ts";
+export { detectToolIntent, detectUserIntent, loadToolIntentVocabulary } from "./tool-intent.ts";
+export { buildToolIntentNudge, reserveToolIntentNudge } from "./tool-intent-injection.ts";
 export { registerParallelReadTool } from "./parallel-read-tool.ts";
 
 export async function handleBeforeAgentStart(pi: any, event: any, ctx: any, state: RuntimeState): Promise<any | undefined> {
+	handleUserIntent(event, state);
 	// Pre-flight fold check
 	if (state.config.enabled && state.config.autoFold && state.engine.turnIndex > 0) {
 		const preflight = estimateTurnStart(ctx, state.config);
@@ -78,6 +81,7 @@ export async function handleContext(event: any, ctx: any, state: RuntimeState): 
 
 export function handleBeforeProviderRequest(event: any, ctx: any, state: RuntimeState): void {
 	handleProviderPrefix(event, ctx, state);
+	maybeInjectToolIntentNudge(event, ctx, state);
 }
 
 export async function handleTurnEnd(event: any, pi: any, ctx: any, state: RuntimeState): Promise<void> {
@@ -87,6 +91,7 @@ export async function handleTurnEnd(event: any, pi: any, ctx: any, state: Runtim
 }
 
 export async function handleMessageEnd(event: any, pi: any, ctx: any, state: RuntimeState): Promise<void> {
+	handleAssistantMessageIntent(event?.message ?? event, state);
 	await handleAgentMessagePrune(pi, ctx, state, event);
 }
 

@@ -76,6 +76,57 @@
   "engine.zone.orange": "оранжевая",
   "engine.zone.red": "красная",
   "engine.zone.yellow": "жёлтая",
+  "intent.actionVerbs": [
+    "вызови",
+    "вызвать",
+    "запусти",
+    "запустить",
+    "используй",
+    "использовать",
+    "выполни",
+    "выполнить"
+  ],
+  "intent.explanationMarkers": [
+    "пример",
+    "схема",
+    "параметры",
+    "синтаксис"
+  ],
+  "intent.futureMarkers": [
+    "сейчас",
+    "дальше",
+    "затем",
+    "потом"
+  ],
+  "intent.toolNouns": [
+    "инструмент",
+    "функцию",
+    "тул"
+  ],
+  "intent.user.analyzeWords": [
+    "анализ",
+    "проанализируй",
+    "проверь",
+    "изучи",
+    "отладь",
+    "диагностируй"
+  ],
+  "intent.user.pruneWords": [
+    "prune",
+    "очисти",
+    "очистка",
+    "сожми",
+    "сжатие",
+    "суммаризируй",
+    "обобщи"
+  ],
+  "intent.user.searchWords": [
+    "найди",
+    "искать",
+    "поищи",
+    "ищи",
+    "найти"
+  ],
   "payload.assistantMessages": "Сообщений ассистента: {count}",
   "payload.includeUsage": "Запрошена потоковая статистика: {value}",
   "payload.messages": "Отправлено сообщений: {count}",
@@ -181,6 +232,9 @@
   "status.pruneNext.off": "выкл",
   "status.pruneNext.toolBatch": "при пачке инструментов",
   "status.pruneNext.turns": "через {turns} ответ.",
+  "status.prunePreservedDuringFlush": "Сохранено во время очистки: {batches} пачек · {tools} вызовов инструментов · последний {lastBatches}/{lastTools}",
+  "status.pruneRebuildImpact": "Пересборка: {source} -> {output} сообщений · к удалению {prunable} · применено {applied} · сэкономлено ~{saved} · чекпоинт {checkpoint} · {reason}",
+  "status.pruneRegret": "Повторные чтения после сжатия: поиск {lookup} · чтение {read} · чтение после свёртки {foldRead}",
   "status.prunerNotDetected": "pi-context-prune не обнаружен",
   "status.pruneSliceImpact": "Контекстный срез очистки: {raw} -> {summary} · минус {delta} · последний {lastRaw} -> {lastSummary}",
   "status.pruneSummaryImpact": "Стоимость резюме для очистки: {requests} запросов · {tokens} токенов · ${cost} всего · ${last} последний",
@@ -334,7 +388,10 @@
   "ui.dashboard.pruneMode": "режим",
   "ui.dashboard.pruneNext": "следующее",
   "ui.dashboard.prunePending": "очередь",
+  "ui.dashboard.prunePreservedDuringFlush": "сохранено во время очистки {batches} пачек · {tools} инструментов · последний {lastBatches}/{lastTools}",
   "ui.dashboard.pruneProgress": "прогресс {progress} до порога {target}",
+  "ui.dashboard.pruneRebuildImpact": "пересборка {source}->{output} сообщ. · к удалению {prunable} · применено {applied} · минус ~{saved} · чекпоинт {checkpoint}",
+  "ui.dashboard.pruneRegret": "повторные чтения поиск {lookup} · чтение {read} · чтение после свёртки {foldRead}",
   "ui.dashboard.pruneSliceImpact": "контекстный срез {raw} -> {summary} · минус {delta} · последний {lastRaw} -> {lastSummary}",
   "ui.dashboard.pruneSummarized": "обобщено",
   "ui.dashboard.pruneSummaryImpact": "запросы на резюме {requests} · токены {tokens} · стоимость {cost} · последний {last}",

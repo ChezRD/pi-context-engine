@@ -16,6 +16,7 @@ const {
 	extractPinnedSkills,
 	extractPinnedConstraints,
 	extractContextEnginePins,
+	extractSessionIntent,
 	buildFoldMessage,
 	trimTrailingAssistantToolCalls,
 	summarizeHead,
@@ -400,11 +401,13 @@ describe("buildFoldMessage", () => {
 	it("includes marker + summary + skills + constraints + enginePins sections", () => {
 		const msg = buildFoldMessage("<fold>", "summary text", [{ id: "s1", content: "<skill-pin name=\"s1\">\ncontent\n</skill-pin>" }], ["[HIGH PRIORITY] urgent"], [
 			{ kind: "priority", name: "my-rule", content: "important", raw: '<context-engine-pin kind="priority" name="my-rule">\nimportant\n</context-engine-pin>', version: 1 },
-		]);
+		], "Initial user goal: keep cache hit high");
 		assert.equal(msg.role, "assistant");
 		assert.ok(msg.reasoning_content !== undefined);
 		assert.ok(msg.content.includes("<fold>"));
 		assert.ok(msg.content.includes("summary text"));
+		assert.ok(msg.content.includes("Session intent"));
+		assert.ok(msg.content.includes("keep cache hit high"));
 		assert.ok(msg.content.includes("skill-pin"));
 		assert.ok(msg.content.includes("HIGH PRIORITY"));
 		assert.ok(msg.content.includes("Context Engine pinned material"));
@@ -444,6 +447,20 @@ describe("buildFoldMessage", () => {
 		]);
 		assert.equal(msg.reasoning_content, "");
 		assert.ok(msg.content.indexOf("Context Engine pinned material") < msg.content.indexOf("Active skill memos"));
+	});
+});
+
+describe("extractSessionIntent", () => {
+	it("keeps first user goal and later explicit constraints within budget", () => {
+		const intent = extractSessionIntent([
+			{ role: "system", content: "system" },
+			{ role: "user", content: [{ type: "text", text: "Optimize pruning so cache hit stays high." }] },
+			{ role: "assistant", content: "ok" },
+			{ role: "user", content: "[HIGH PRIORITY] Do not lose tool refs.\n\nother" },
+		], 180);
+		assert.match(intent, /Initial user goal: Optimize pruning/);
+		assert.match(intent, /Constraint: \[HIGH PRIORITY\] Do not lose tool refs/);
+		assert.ok((intent?.length ?? 0) <= 180);
 	});
 });
 

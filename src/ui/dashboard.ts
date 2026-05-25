@@ -371,7 +371,19 @@ function buildPruneLines(state: RuntimeState, theme: any): string[] {
 		const deltaChars = formatTokenCount(Math.max(0, (impact.lastSummarizeRawChars ?? 0) - (impact.lastSummarizeSummaryChars ?? 0)));
 		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneSummaryImpact", { requests: impact.summarizeRequests, tokens: formatTokenCount(impact.summarizeInputTokens + impact.summarizeOutputTokens), cost: summaryCost, last: lastSummaryCost })}`));
 		lines.push(theme.fg("success", `  ${t(cfg, "ui.dashboard.pruneSliceImpact", { raw: rawChars, summary: summaryChars, delta: deltaChars, lastRaw: lastRawChars, lastSummary: lastSummaryChars })}`));
+		if (impact.lastRebuildSourceMessages !== undefined) {
+			lines.push(theme.fg("success", `  ${t(cfg, "ui.dashboard.pruneRebuildImpact", {
+				source: impact.lastRebuildSourceMessages,
+				output: impact.lastRebuildOutputMessages ?? 0,
+				prunable: impact.lastRebuildPrunableIds ?? 0,
+				applied: impact.lastRebuildNewlyApplied ?? 0,
+				saved: formatTokenCount(impact.lastRebuildSavedApproxChars ?? 0),
+				checkpoint: impact.lastRebuildCheckpointOpened ? t(cfg, "status.yes") : t(cfg, "status.no"),
+			})}`));
+		}
 		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneMissImpact", { requests: impact.postPruneRequests, miss: formatTokenCount(impact.lastPostPruneMissTokens ?? 0), cache: formatTokenCount(impact.postPruneCacheReadTokens), cost: lastMissCost, last: lastMissCost, hit: lastHit })}`));
+		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.pruneRegret", { lookup: impact.postPruneLookupRegret ?? 0, read: impact.postPruneReadRegret ?? 0, foldRead: impact.postFoldReadRegret ?? 0 })}`));
+		lines.push(theme.fg("dim", `  ${t(cfg, "ui.dashboard.prunePreservedDuringFlush", { batches: impact.pendingBatchesPreservedDuringFlush ?? 0, tools: impact.pendingToolCallsPreservedDuringFlush ?? 0, lastBatches: impact.lastPendingBatchesPreservedDuringFlush ?? 0, lastTools: impact.lastPendingToolCallsPreservedDuringFlush ?? 0 })}`));
 		if (impact.lastError) {
 			lines.push(theme.fg("warning", `  ${t(cfg, "ui.dashboard.pruneError", { error: impact.lastError })}`));
 		}

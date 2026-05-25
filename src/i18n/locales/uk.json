@@ -76,6 +76,49 @@
   "engine.zone.orange": "помаранчевий",
   "engine.zone.red": "червоний",
   "engine.zone.yellow": "жовтий",
+  "intent.actionVerbs": [
+    "виклич",
+    "викликати",
+    "запусти",
+    "запустити",
+    "використай",
+    "використати",
+    "виконай",
+    "виконати"
+  ],
+  "intent.explanationMarkers": [
+    "приклад",
+    "схема",
+    "параметри",
+    "синтаксис"
+  ],
+  "intent.futureMarkers": [
+    "зараз",
+    "далі",
+    "потім"
+  ],
+  "intent.toolNouns": [
+    "інструмент",
+    "функцію"
+  ],
+  "intent.user.analyzeWords": [
+    "проаналізуй",
+    "перевір",
+    "досліди",
+    "відлагодь"
+  ],
+  "intent.user.pruneWords": [
+    "prune",
+    "стисни",
+    "очисти",
+    "узагальни"
+  ],
+  "intent.user.searchWords": [
+    "знайди",
+    "пошукай",
+    "шукай",
+    "знайти"
+  ],
   "payload.assistantMessages": "Повідомлення асистента: {count}",
   "payload.includeUsage": "Запитано потокову статистику використання: {value}",
   "payload.messages": "Надіслано повідомлень: {count}",
@@ -181,6 +224,9 @@
   "status.pruneNext.off": "вимк",
   "status.pruneNext.toolBatch": "при пачці інструментів",
   "status.pruneNext.turns": "через {turns} відп.",
+  "status.prunePreservedDuringFlush": "Збережено під час очищення: {batches} пачок · {tools} викликів інструментів · останній {lastBatches}/{lastTools}",
+  "status.pruneRebuildImpact": "Перескладання: {source} -> {output} повідомлень · до видалення {prunable} · застосовано {applied} · заощаджено ~{saved} · чекпойнт {checkpoint} · {reason}",
+  "status.pruneRegret": "Повторні читання після стиснення: пошук {lookup} · читання {read} · читання після згортання {foldRead}",
   "status.prunerNotDetected": "Розширення pi-context-prune не виявлено",
   "status.pruneSliceImpact": "Стиснутий фрагмент очищення: {raw} -> {summary} · зекономлено {delta} · останній {lastRaw} -> {lastSummary}",
   "status.pruneSummaryImpact": "Вартість резюме для очищення: {requests} запитів · {tokens} токенів · ${cost} загалом · ${last} останній",
@@ -334,7 +380,10 @@
   "ui.dashboard.pruneMode": "режим",
   "ui.dashboard.pruneNext": "наступне",
   "ui.dashboard.prunePending": "черга",
+  "ui.dashboard.prunePreservedDuringFlush": "збережено під час очищення {batches} пачок · {tools} інструментів · останній {lastBatches}/{lastTools}",
   "ui.dashboard.pruneProgress": "прогрес {progress} до порогу {target}",
+  "ui.dashboard.pruneRebuildImpact": "перескладання {source}->{output} повід. · до видалення {prunable} · застосовано {applied} · мінус ~{saved} · чекпойнт {checkpoint}",
+  "ui.dashboard.pruneRegret": "повторні читання пошук {lookup} · читання {read} · читання після згортання {foldRead}",
   "ui.dashboard.pruneSliceImpact": "заміщений фрагмент {raw} -> {summary} · зекономлено {delta} · останній {lastRaw} -> {lastSummary}",
   "ui.dashboard.pruneSummarized": "узагальнено",
   "ui.dashboard.pruneSummaryImpact": "запити на резюме {requests} · токени {tokens} · вартість {cost} · останній {last}",

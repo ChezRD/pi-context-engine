@@ -209,7 +209,10 @@ async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promis
 	if (state.engine.prune.pendingBatches.length === 0) return;
 	if (state.engine.prune.isFlushing) return;
 	state.engine.prune.isFlushing = true;
-	const flushingBatches = state.engine.prune.pendingBatches.slice();
+	const flushingBatches = state.engine.prune.pendingBatches.map((batch) => ({
+		...batch,
+		toolCalls: batch.toolCalls.map((toolCall) => ({ ...toolCall })),
+	}));
 	const flushingIds = new Set(flushingBatches.flatMap((batch) => batch.toolCalls.map((tc) => tc.id)));
 	try {
 		const { summarizeToolBatchPool } = await import("../projection/tool-pruner.ts");
@@ -296,7 +299,21 @@ async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promis
 			});
 		}
 		if (summarized > 0 || skippedOversized > 0) {
-			state.engine.prune.pendingBatches = state.engine.prune.pendingBatches.filter((batch) => batch.toolCalls.some((tc) => !flushingIds.has(tc.id)));
+			let preservedBatches = 0;
+			let preservedToolCalls = 0;
+			state.engine.prune.pendingBatches = state.engine.prune.pendingBatches
+				.map((batch) => ({ ...batch, toolCalls: batch.toolCalls.filter((tc) => !flushingIds.has(tc.id)) }))
+				.filter((batch) => {
+					if (batch.toolCalls.length === 0) return false;
+					preservedBatches++;
+					preservedToolCalls += batch.toolCalls.length;
+					return true;
+				});
+			const impact = state.engine.prune.impact;
+			impact.pendingBatchesPreservedDuringFlush = (impact.pendingBatchesPreservedDuringFlush ?? 0) + preservedBatches;
+			impact.pendingToolCallsPreservedDuringFlush = (impact.pendingToolCallsPreservedDuringFlush ?? 0) + preservedToolCalls;
+			impact.lastPendingBatchesPreservedDuringFlush = preservedBatches;
+			impact.lastPendingToolCallsPreservedDuringFlush = preservedToolCalls;
 			if (state.engine.prune.pendingBatches.length === 0) {
 				state.engine.prune.batchStepCounter = 0;
 				state.engine.prune.awaitingAgentMessage = false;

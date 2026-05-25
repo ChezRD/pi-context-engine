@@ -1,3 +1,5 @@
+import type { ToolIntentState } from "./cache-engine/tool-intent.ts";
+
 export type StatusLevel = "off" | "ok" | "warn" | "danger";
 
 export type DecisionKind = "none" | "warn" | "hold" | "fold" | "aggressive-fold" | "exit-with-summary" | "preflight-fold";
@@ -187,9 +189,14 @@ export interface SessionMapNode {
 	toolCallId?: string;
 	toolName?: string;
 	parentNodeId?: string;
+	contentHash?: string;
+	argsHash?: string;
+	resultHash?: string;
 	ref?: string;
 	offset?: number;
 	limit?: number;
+	path?: string;
+	hasUnfetchedTail?: boolean;
 	summarized?: boolean;
 	dropCandidate?: boolean;
 }
@@ -200,7 +207,28 @@ export interface SessionMapSegment {
 	kind: SessionMapSegmentKind;
 	nodeIds: string[];
 	dropCandidate?: boolean;
+	summary?: string;
+	risk?: "low" | "medium" | "high";
+	facts?: {
+		refs: string[];
+		paths: string[];
+		hasUnfetchedTail: boolean;
+		toolNames: string[];
+	};
 	reason?: string;
+}
+
+export interface SessionPruneSuggestion {
+	dropSegmentIds: string[];
+	reason?: string;
+}
+
+export interface SessionPruneSuggestionValidation {
+	acceptedSegmentIds: string[];
+	rejected: Array<{
+		id: string;
+		reason: "unknown-segment" | "contains-user-message" | "not-drop-candidate" | "pending-tool-call" | "current-tail";
+	}>;
 }
 
 export interface SessionContentMap {
@@ -306,9 +334,23 @@ export interface PruneState {
 		postPruneMissTokens: number;
 		postPruneCacheReadTokens: number;
 		postPruneMissCost: number;
+		postPruneLookupRegret?: number;
+		postPruneReadRegret?: number;
+		postFoldReadRegret?: number;
+		pendingBatchesPreservedDuringFlush?: number;
+		pendingToolCallsPreservedDuringFlush?: number;
+		lastPendingBatchesPreservedDuringFlush?: number;
+		lastPendingToolCallsPreservedDuringFlush?: number;
 		lastPostPruneHitRate?: number;
 		lastPostPruneMissTokens?: number;
 		lastPostPruneMissCost?: number;
+		lastRebuildSourceMessages?: number;
+		lastRebuildOutputMessages?: number;
+		lastRebuildPrunableIds?: number;
+		lastRebuildNewlyApplied?: number;
+		lastRebuildCheckpointOpened?: boolean;
+		lastRebuildSavedApproxChars?: number;
+		lastRebuildReason?: string;
 		lastError?: string;
 	};
 }
@@ -360,6 +402,7 @@ export interface CacheEngineState {
 	holdUntilTurn?: number;
 	appendOnly: AppendOnlyProjectionState;
 	recentToolCalls: Map<string, number>;
+	toolIntent: ToolIntentState;
 	foldToolRegistered: boolean;
 	lastPinInjectionHash?: string;
 }

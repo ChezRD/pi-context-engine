@@ -76,6 +76,59 @@
   "engine.zone.orange": "Orange",
   "engine.zone.red": "Rot",
   "engine.zone.yellow": "Gelb",
+  "intent.actionVerbs": [
+    "call",
+    "invoke",
+    "run",
+    "use",
+    "execute"
+  ],
+  "intent.explanationMarkers": [
+    "example",
+    "schema",
+    "parameters",
+    "syntax"
+  ],
+  "intent.futureMarkers": [
+    "now",
+    "next",
+    "then",
+    "will"
+  ],
+  "intent.toolNouns": [
+    "tool",
+    "function"
+  ],
+  "intent.user.analyzeWords": [
+    "analyze",
+    "analyse",
+    "inspect",
+    "audit",
+    "review",
+    "diagnose",
+    "debug",
+    "study",
+    "investigate"
+  ],
+  "intent.user.pruneWords": [
+    "prune",
+    "compact",
+    "compress",
+    "summarize",
+    "summarise",
+    "pruning"
+  ],
+  "intent.user.searchWords": [
+    "search",
+    "find",
+    "locate",
+    "lookup",
+    "look up",
+    "grep",
+    "scan",
+    "browse",
+    "trace"
+  ],
   "payload.assistantMessages": "Assistent-Nachrichten: {count}",
   "payload.includeUsage": "Nutzung einschließen: {value}",
   "payload.messages": "Gesendete Nachrichten: {count}",
@@ -181,6 +234,9 @@
   "status.pruneNext.off": "aus",
   "status.pruneNext.toolBatch": "bei Tool-Batch",
   "status.pruneNext.turns": "in {turns} Antworten",
+  "status.prunePreservedDuringFlush": "Während Flush erhalten: {batches} Batches · {tools} Tool-Aufrufe · zuletzt {lastBatches}/{lastTools}",
+  "status.pruneRebuildImpact": "Neuaufbau: {source} -> {output} Nachrichten · entfernbar {prunable} · angewendet {applied} · ~{saved} gespart · Prüfpunkt {checkpoint} · {reason}",
+  "status.pruneRegret": "Wiederholte Lesezugriffe nach Komprimierung: lookup {lookup} · read {read} · fold-read {foldRead}",
   "status.prunerNotDetected": "pi-context-prune nicht erkannt",
   "status.pruneSliceImpact": "Bereinigungs-Slice: {raw} -> {summary} · gespart {delta} · zuletzt {lastRaw} -> {lastSummary}",
   "status.pruneSummaryImpact": "Kosten der Bereinigungs-Zusammenfassung: {requests} Anfragen · {tokens} Tokens · ${cost} gesamt · ${last} zuletzt",
@@ -334,7 +390,10 @@
   "ui.dashboard.pruneMode": "Modus",
   "ui.dashboard.pruneNext": "nächst.",
   "ui.dashboard.prunePending": "ausstehend",
+  "ui.dashboard.prunePreservedDuringFlush": "während Flush erhalten {batches} Batches · {tools} Tools · zuletzt {lastBatches}/{lastTools}",
   "ui.dashboard.pruneProgress": "Fortschritt {progress} bis Schwelle {target}",
+  "ui.dashboard.pruneRebuildImpact": "Neuaufbau {source}->{output} Nachr. · entfernbar {prunable} · angewendet {applied} · ~{saved} gespart · Prüfpunkt {checkpoint}",
+  "ui.dashboard.pruneRegret": "erneute Lesezugriffe lookup {lookup} · read {read} · fold-read {foldRead}",
   "ui.dashboard.pruneSliceImpact": "ersetzter Slice {raw} -> {summary} · gespart {delta} · zuletzt {lastRaw} -> {lastSummary}",
   "ui.dashboard.pruneSummarized": "zusammengefasst",
   "ui.dashboard.pruneSummaryImpact": "Zusammenfassungsanfragen {requests} · Tokens {tokens} · Kosten {cost} · zuletzt {last}",

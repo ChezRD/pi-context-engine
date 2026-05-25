@@ -76,6 +76,59 @@
   "engine.zone.orange": "orange",
   "engine.zone.red": "red",
   "engine.zone.yellow": "yellow",
+  "intent.actionVerbs": [
+    "call",
+    "invoke",
+    "run",
+    "use",
+    "execute"
+  ],
+  "intent.explanationMarkers": [
+    "example",
+    "schema",
+    "parameters",
+    "syntax"
+  ],
+  "intent.futureMarkers": [
+    "now",
+    "next",
+    "then",
+    "will"
+  ],
+  "intent.toolNouns": [
+    "tool",
+    "function"
+  ],
+  "intent.user.analyzeWords": [
+    "analyze",
+    "analyse",
+    "inspect",
+    "audit",
+    "review",
+    "diagnose",
+    "debug",
+    "study",
+    "investigate"
+  ],
+  "intent.user.pruneWords": [
+    "prune",
+    "compact",
+    "compress",
+    "summarize",
+    "summarise",
+    "pruning"
+  ],
+  "intent.user.searchWords": [
+    "search",
+    "find",
+    "locate",
+    "lookup",
+    "look up",
+    "grep",
+    "scan",
+    "browse",
+    "trace"
+  ],
   "payload.assistantMessages": "Assistant messages: {count}",
   "payload.includeUsage": "Streaming usage requested: {value}",
   "payload.messages": "Messages sent: {count}",
@@ -181,6 +234,9 @@
   "status.pruneNext.off": "off",
   "status.pruneNext.toolBatch": "on tool batch",
   "status.pruneNext.turns": "in {turns} responses",
+  "status.prunePreservedDuringFlush": "Preserved during flush: {batches} batches · {tools} tool calls · last {lastBatches}/{lastTools}",
+  "status.pruneRebuildImpact": "Rebuild: {source} -> {output} messages · prunable {prunable} · applied {applied} · saved ~{saved} · checkpoint {checkpoint} · {reason}",
+  "status.pruneRegret": "Compression regret: lookup {lookup} · read {read} · fold-read {foldRead}",
   "status.prunerNotDetected": "pi-context-prune not detected",
   "status.pruneSliceImpact": "Prune slice: {raw} -> {summary} · saved {delta} · last {lastRaw} -> {lastSummary}",
   "status.pruneSummaryImpact": "Prune summary cost: {requests} requests · {tokens} tokens · ${cost} total · ${last} last",
@@ -334,7 +390,10 @@
   "ui.dashboard.pruneMode": "mode",
   "ui.dashboard.pruneNext": "next",
   "ui.dashboard.prunePending": "pending",
+  "ui.dashboard.prunePreservedDuringFlush": "preserved during flush {batches} batches · {tools} tools · last {lastBatches}/{lastTools}",
   "ui.dashboard.pruneProgress": "progress {progress} to trigger threshold {target}",
+  "ui.dashboard.pruneRebuildImpact": "rebuild {source}->{output} msgs · prunable {prunable} · applied {applied} · saved ~{saved} · checkpoint {checkpoint}",
+  "ui.dashboard.pruneRegret": "regret lookup {lookup} · read {read} · fold-read {foldRead}",
   "ui.dashboard.pruneSliceImpact": "replacement slice {raw} -> {summary} · saved {delta} · last {lastRaw} -> {lastSummary}",
   "ui.dashboard.pruneSummarized": "summarized",
   "ui.dashboard.pruneSummaryImpact": "summary requests {requests} · tokens {tokens} · cost {cost} · last {last}",
