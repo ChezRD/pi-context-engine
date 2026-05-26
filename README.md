@@ -4,11 +4,14 @@ Unified context management for the [Pi coding agent](https://github.com/earendil
 
 > **Provider compatibility:** Currently tested and reliable with the DeepSeek provider family. A universal provider-agnostic mechanism is under active development.
 
-## What problem it solves
+> [!WARNING]
+> **Not production ready.** Project is mostly vibe-coded with some guidance from me and my vision. This extension is under active development. Expect bugs. Use at your own risk in important sessions.
+
+## What problem it meant to solve
 
 Long Pi sessions fill the context window with tool output noise. Without management, you hit context limits, lose cache reuse, and watch the model forget earlier work.
 
-This extension gives you:
+This extension is for:
 
 - **Visibility** — real-time cache hit rate, context pressure, and turn estimates in the Pi status bar
 - **Control** — semantic folding, checkpoint/rewind, and manual compaction
