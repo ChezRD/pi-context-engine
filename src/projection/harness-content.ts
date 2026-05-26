@@ -98,7 +98,7 @@ export function extractHarnessResultFacts(text: string | undefined): HarnessResu
 	const trimmed = text.trim();
 	if (isDuplicateSkipResult(trimmed)) return { kind: "duplicate-skip", duplicateSkip: true, continuation: "none" };
 	if (isModelVisibleContext(trimmed)) {
-		const lookup = extractModelVisibleSection(trimmed, "lookup");
+		const lookup = extractModelVisibleSection(trimmed, "slice_metadata") ?? extractModelVisibleSection(trimmed, "lookup");
 		const facts = parseContextResultLookupHeader(firstContextResultLookupHeader(lookup));
 		if (facts) return facts;
 		return { kind: "preview", continuation: "unknown" };

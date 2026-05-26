@@ -1,8 +1,10 @@
 import { Type } from "typebox";
 import type { Static } from "typebox";
+import { Text } from "@earendil-works/pi-tui";
 import type { RuntimeState } from "../runtime-state.ts";
 import { openCacheCheckpoint } from "../cache-engine/cache-checkpoints.ts";
 import { t } from "../i18n/index.ts";
+import { extractToolResultText } from "../capper.ts";
 import { discoverSkills, findSkill, loadSkillAsPin, MAX_SKILL_DISPLAY_CHARS } from "./skills.ts";
 
 const ContextPinSkillParams = Type.Object({
@@ -34,7 +36,7 @@ export function registerPinTools(pi: any, state: RuntimeState): void {
 
 			if (!loaded) {
 				const all = discoverSkills(projectDir);
-				const names = all.length > 0 ? all.map(s => s.name).join(", ") : "none found";
+				const names = all.map(s => s.name).join(", ");
 				return {
 					content: [{
 						type: "text",
@@ -66,6 +68,17 @@ export function registerPinTools(pi: any, state: RuntimeState): void {
 				}],
 			};
 		},
+		renderCall(args: any, theme: any): Text {
+			const name = String(args.name ?? "");
+			return new Text(theme.fg("toolTitle", theme.bold("📌 skill: ")) + theme.fg("accent", `"${name}"`), 0, 0);
+		},
+		renderResult(result: any, _opts: any, theme: any): Text {
+			const text = extractToolResultText(result?.content);
+			if (!text) return new Text("", 0, 0);
+			const clean = text.replace(/---[\s\S]*$/, "").trim();
+			const firstLine = clean.split(/\r?\n/)[0];
+			return new Text(theme.fg("toolOutput", firstLine), 0, 0);
+		},
 	});
 
 	// ── context_pin ──
@@ -75,35 +88,61 @@ export function registerPinTools(pi: any, state: RuntimeState): void {
 		description: t("tool.pin.description"),
 		parameters: ContextPinParams,
 		execute: async (_id: string, params: Static<typeof ContextPinParams>, _signal: any, _onUpdate: any, _ctx: any) => {
-			const kind = params.kind === "priority" ? "priority"
+			// Storage kind — mapped to pinStore-compatible value
+			const storageKind = params.kind === "priority" ? "priority"
 				: params.kind === "user-memory" ? "user-memory"
 				: params.kind === "project-memory" ? "project-memory"
-				: params.kind === "working-rule" ? "priority" // map to priority kind
+				: params.kind === "working-rule" ? "priority"
 				: "priority";
+
+			// Display kind — localized user-facing label
+			const displayKind = t("tool.pin.kind." + params.kind, { defaultValue: params.kind });
 
 			const priority = params.priority === "high" ? "high" as const : undefined;
 
-			const changed = state.pinStore.set(kind, params.name, params.content, {
+			const changed = state.pinStore.set(storageKind, params.name, params.content, {
 				scope: (params.scope as "session" | "project" | "global") ?? "session",
 				priority,
 				source: "explicit-tool",
 			});
 
 			if (changed) {
-				openCacheCheckpoint(state, "pin_drift", { note: `${kind}: ${params.name}`, startSegment: false });
+				openCacheCheckpoint(state, "pin_drift", { note: `${storageKind}: ${params.name}`, startSegment: false });
 			}
 
 			const preview = params.content.length > 200
 				? params.content.slice(0, 200) + "..." : params.content;
 
-			const xml = `<context-engine-pin kind="${kind}" name="${params.name}" version="1">\n${params.content}\n</context-engine-pin>`;
+			// Use original kind in XML — model understands these values
+			const xml = `<context-engine-pin kind="${params.kind}" name="${params.name}" version="1">\n${params.content}\n</context-engine-pin>`;
 
 			return {
 				content: [{
 					type: "text",
-					text: t(changed ? "tool.pin.result.pinned" : "tool.pin.result.active", { kind, name: params.name, priority: priority === "high" ? t("tool.pin.priorityHigh") : "", xml, preview }),
+					text: t(changed ? "tool.pin.result.pinned" : "tool.pin.result.active", { kind: displayKind, name: params.name, priority: priority === "high" ? t("tool.pin.priorityHigh") : "", xml, preview }),
 				}],
 			};
+		},
+		renderCall(args: any, theme: any): Text {
+			const rawKind = String(args.kind ?? "");
+			const name = String(args.name ?? "");
+			const emoji = rawKind === "priority" ? "🔴"
+				: rawKind === "user-memory" ? "🧠"
+				: rawKind === "project-memory" ? "📋"
+				: "📌";
+			const displayKind = t("tool.pin.kind." + rawKind, { defaultValue: rawKind });
+			return new Text(theme.fg("toolTitle", theme.bold(`${emoji} ${displayKind}: `)) + theme.fg("accent", `"${name}"`), 0, 0);
+		},
+		renderResult(result: any, _opts: any, theme: any): Text {
+			const text = extractToolResultText(result?.content);
+			if (!text) return new Text("", 0, 0);
+			// Strip XML block and --- separator section, keep only confirmation line
+			const clean = text
+				.replace(/<context-engine-pin[\s\S]*?<\/context-engine-pin>/g, "")
+				.replace(/---[\s\S]*$/, "")
+				.trim();
+			const firstLine = clean.split(/\r?\n/)[0];
+			return new Text(theme.fg("toolOutput", firstLine), 0, 0);
 		},
 	});
 }

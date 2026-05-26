@@ -123,7 +123,7 @@ export function detectLocale(): string {
 	return runtime.forcedLocale ?? localeFromRpiv() ?? localeFromArgs() ?? localeFromConfig() ?? localeFromEnv() ?? "en";
 }
 
-function registerStrings(namespace: string, byLocale: LocaleMessages): void {
+export function registerStrings(namespace: string, byLocale: LocaleMessages): void {
 	const runtime = getRuntime();
 	const map = new Map<string, Messages>();
 	for (const [locale, strings] of Object.entries(byLocale)) map.set(locale, Object.freeze({ ...strings }));
@@ -131,10 +131,10 @@ function registerStrings(namespace: string, byLocale: LocaleMessages): void {
 	rebuildActive(namespace);
 }
 
-function findLocaleMap(byLocale: Map<string, Messages>, locale: string): Messages | undefined {
+export function findLocaleMap(byLocale: Map<string, Messages>, locale: string): Messages | undefined {
 	const direct = byLocale.get(locale);
 	if (direct) return direct;
-	const short = locale.split("-")[0] ?? locale;
+	const short = locale.split("-")[0];
 	const shortMatch = byLocale.get(short);
 	if (shortMatch) return shortMatch;
 	if (short.length === 2) {

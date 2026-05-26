@@ -28,10 +28,12 @@ export interface ExtensionConfig {
 	pruneIncludeContext: boolean;
 	pruneBatchSize: number;
 	pruneBridgeLength: number;
-	pruneAgentMessageFallback: "off" | "before-provider";
+	pruneAgentMessageFallback: "off" | "next-agent-start" | "before-provider";
 	toolIntentNudge: boolean;
 	toolIntentNudgeMinConfidence: "high" | "medium" | "low";
 	toolIntentNudgeMaxChars: number;
+	toolStabilityBypass: string[];
+	toolBlockThreshold: number;
 	dashboardVerbosity: "compact" | "normal" | "verbose" | "debug";
 	statusBarStyle: "blocks" | "sparkline" | "text";
 	autoFold: boolean;
@@ -76,6 +78,7 @@ export interface ExtensionConfig {
 }
 
 export const CONFIG_BASENAME = "context-engine.json";
+export const DEFAULT_DEEPSEEK_MODEL = "deepseek/deepseek-v4-flash";
 
 export const DEFAULT_CONFIG: ExtensionConfig = {
 	enabled: true,
@@ -98,14 +101,14 @@ export const DEFAULT_CONFIG: ExtensionConfig = {
 	autoCompactAtHighWatermark: false,
 	autoFold: true,
 	foldTailPct: 0.20,
-	foldSummaryModel: "deepseek-v4-flash",
+	foldSummaryModel: DEFAULT_DEEPSEEK_MODEL,
 	foldTool: false,
 	cachePromptInjection: true,
 	showCostSavings: true,
 	showCostBreakdown: true,
 	showSavings: true,
 	strictPrefixWarnings: false,
-	parallelReadTool: false,
+	parallelReadTool: true,
 	contextWarnPct: 0.60,
 	contextDangerPct: 0.72,
 	contextCompactPct: 0.82,
@@ -120,14 +123,16 @@ export const DEFAULT_CONFIG: ExtensionConfig = {
 	enableAgenticTools: true,
 	pruneEnabled: true,
 	pruneOn: "agent-message",
-	pruneModel: "deepseek-v4-flash",
+	pruneModel: DEFAULT_DEEPSEEK_MODEL,
 	pruneIncludeContext: false,
-	pruneBatchSize: 5,
+	pruneBatchSize: 50,
 	pruneBridgeLength: 2,
-	pruneAgentMessageFallback: "before-provider",
+	pruneAgentMessageFallback: "next-agent-start",
 	toolIntentNudge: true,
 	toolIntentNudgeMinConfidence: "medium",
 	toolIntentNudgeMaxChars: 500,
+	toolStabilityBypass: ["read"],
+	toolBlockThreshold: 2,
 	dashboardVerbosity: "normal",
 	statusBarStyle: "sparkline",
 	foldThreshold: 0.75,
@@ -165,8 +170,8 @@ function pruneMode(value: unknown, fallback: string): string {
 	return ["every-turn", "checkpoint", "on-demand", "agent-message", "agentic-auto"].includes(normalized) ? normalized : fallback;
 }
 
-function pruneAgentMessageFallback(value: unknown, fallback: "off" | "before-provider"): "off" | "before-provider" {
-	return value === "off" || value === "before-provider" ? value : fallback;
+function pruneAgentMessageFallback(value: unknown, fallback: "off" | "next-agent-start" | "before-provider"): "off" | "next-agent-start" | "before-provider" {
+	return value === "off" || value === "next-agent-start" || value === "before-provider" ? value : fallback;
 }
 
 function num(value: unknown, fallback: number, min = 0): number {
@@ -176,6 +181,11 @@ function num(value: unknown, fallback: number, min = 0): number {
 function intRange(value: unknown, fallback: number, min: number, max: number): number {
 	const n = typeof value === "number" && Number.isFinite(value) ? value : fallback;
 	return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function intRangeStep(value: unknown, fallback: number, min: number, max: number, step: number): number {
+	const clamped = intRange(value, fallback, min, max);
+	return Math.max(min, Math.min(max, Math.round(clamped / step) * step));
 }
 
 function confidence(value: unknown, fallback: "high" | "medium" | "low"): "high" | "medium" | "low" {
@@ -192,6 +202,8 @@ function pct(value: unknown, fallback: number): number {
 }
 
 export function getConfigPath(): string {
+	const override = process.env.PI_CONTEXT_ENGINE_CONFIG;
+	if (override && override.trim().length > 0) return override.trim();
 	return join(homedir(), ".pi", "agent", CONFIG_BASENAME);
 }
 
@@ -242,12 +254,14 @@ export function parseConfig(value: unknown): ExtensionConfig {
 		pruneOn: pruneMode(value.pruneOn, DEFAULT_CONFIG.pruneOn),
 		pruneModel: str(value.pruneModel, DEFAULT_CONFIG.pruneModel),
 		pruneIncludeContext: bool(value.pruneIncludeContext, DEFAULT_CONFIG.pruneIncludeContext),
-		pruneBatchSize: intRange(value.pruneBatchSize, DEFAULT_CONFIG.pruneBatchSize, 1, 20),
+		pruneBatchSize: intRangeStep(value.pruneBatchSize, DEFAULT_CONFIG.pruneBatchSize, 20, 100, 5),
 		pruneBridgeLength: intRange(value.pruneBridgeLength, DEFAULT_CONFIG.pruneBridgeLength, 1, 8),
 		pruneAgentMessageFallback: pruneAgentMessageFallback(value.pruneAgentMessageFallback, DEFAULT_CONFIG.pruneAgentMessageFallback),
 		toolIntentNudge: bool(value.toolIntentNudge, DEFAULT_CONFIG.toolIntentNudge),
 		toolIntentNudgeMinConfidence: confidence(value.toolIntentNudgeMinConfidence, DEFAULT_CONFIG.toolIntentNudgeMinConfidence),
 		toolIntentNudgeMaxChars: intRange(value.toolIntentNudgeMaxChars, DEFAULT_CONFIG.toolIntentNudgeMaxChars, 120, 1200),
+		toolStabilityBypass: Array.isArray(value.toolStabilityBypass) ? value.toolStabilityBypass.filter((s): s is string => typeof s === "string") : DEFAULT_CONFIG.toolStabilityBypass,
+		toolBlockThreshold: intRange(value.toolBlockThreshold, DEFAULT_CONFIG.toolBlockThreshold, 1, 10),
 		dashboardVerbosity: dashboardVerbosity(value.dashboardVerbosity, DEFAULT_CONFIG.dashboardVerbosity),
 		statusBarStyle: (value.statusBarStyle === "blocks" || value.statusBarStyle === "sparkline" || value.statusBarStyle === "text") ? value.statusBarStyle : DEFAULT_CONFIG.statusBarStyle,
 		foldThreshold: pct(value.foldThreshold, DEFAULT_CONFIG.foldThreshold),
@@ -277,7 +291,7 @@ export function readConfig(path = getConfigPath()): ExtensionConfig {
 	try {
 		return parseConfig(JSON.parse(readFileSync(path, "utf-8")));
 	} catch (error) {
-		console.warn(`[pi-context-engine] failed to read config: ${error instanceof Error ? error.message : String(error)}`);
+		console.warn(`[pi-context-engine] failed to read config: ${(error as Error).message}`);
 		return { ...DEFAULT_CONFIG };
 	}
 }
@@ -288,6 +302,6 @@ export function writeConfig(config: ExtensionConfig, path = getConfigPath()): { 
 		writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
 		return { ok: true };
 	} catch (error) {
-		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+		return { ok: false, error: (error as Error).message };
 	}
 }

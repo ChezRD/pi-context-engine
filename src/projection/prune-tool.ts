@@ -7,6 +7,7 @@ import { t } from "../i18n/index.ts";
 import { extractAssistantToolCalls, extractMessageContext, hasAssistantToolCalls } from "./batch-capture.ts";
 import { recordPruneSummarizeImpact } from "./prune-impact.ts";
 import type { RuntimeState } from "../runtime-state.ts";
+import { DEFAULT_DEEPSEEK_MODEL } from "../config.ts";
 import { buildObservationMaskSummary, isReplacementSummaryEfficient } from "./tool-pruner.ts";
 import type { ToolCallIndexerInstance } from "./indexer.ts";
 import { appendPruneDebugEntry, persistTelemetry } from "../telemetry-persistence.ts";
@@ -28,14 +29,6 @@ export function emitPruneSummaryMessage(pi: any, ctx: any, summaryText: string, 
 	}
 	const append = ctx?.sessionManager?.appendCustomMessageEntry;
 	if (typeof append === "function") append.call(ctx.sessionManager, CUSTOM_TYPE_PRUNE_SUMMARY, summaryText, false, details);
-}
-
-function isHandledToolCall(id: string, indexer: ToolCallIndexerInstance, state?: RuntimeState): boolean {
-	return indexer.isSummarized(id)
-		|| Boolean(state?.engine.prune.summarizedIds.includes(id))
-		|| Boolean(state?.engine.prune.appliedIds.includes(id))
-		|| Boolean(state?.engine.prune.skippedOversizedIds?.includes(id))
-		|| Boolean(state?.engine.prune.skippedMissingResultIds?.includes(id));
 }
 
 function handledReason(id: string, indexer: ToolCallIndexerInstance, state?: RuntimeState): string | undefined {
@@ -160,7 +153,7 @@ export async function executePrune(
 	}
 
 	const { summarizeToolBatchPool } = await import("./tool-pruner.ts");
-	const pModel = cfg.config?.pruneModel ?? "deepseek-v4-flash";
+	const pModel = cfg.config?.pruneModel ?? DEFAULT_DEEPSEEK_MODEL;
 	const smModel = (pModel === "auto" || pModel === "default") && ctx?.model?.id ? ctx.model.id : pModel;
 	const pool = await summarizeToolBatchPool(
 		pi,
@@ -289,6 +282,7 @@ export function registerPruneTool(pi: any, indexer: ToolCallIndexerInstance, sta
 		parameters: PruneParams,
 		async execute(_id: string, params: Static<typeof PruneParams>, signal: AbortSignal, _onUpdate: any, ctx: any) {
 			const result = await executePrune(pi, ctx, indexer, state, params.mode ?? "auto", signal);
+			if (state && typeof (state as any)?.engine?.recentToolCalls?.clear === "function") (state as any).engine.recentToolCalls.clear();
 			return { content: [{ type: "text", text: result.text }], details: result.details };
 		},
 	});
@@ -304,7 +298,7 @@ export function syncPruneToolActivation(pi: any, config: { enabled?: boolean; pr
 		if (shouldActivate && !hasTool) pi.setActiveTools([...activeTools, "context_prune"]);
 		if (!shouldActivate && hasTool) pi.setActiveTools(activeTools.filter((name: string) => name !== "context_prune"));
 	} catch (error) {
-		if (String(error instanceof Error ? error.message : error).includes("runtime not initialized")) return;
+		if ((error as Error).message.includes("runtime not initialized")) return;
 		throw error;
 	}
 }

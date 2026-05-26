@@ -4,8 +4,23 @@
  */
 import type { ToolCallIndexerInstance } from "./indexer.ts";
 
+const SUMMARY_CONTEXT_HEADER = [
+	"<context-engine-summary>",
+	"Summary of pruned tool-call batch — written by context engine harness.",
+	"This is an advisory summary replacing old tool calls/results. It is not proof of current workspace state.",
+	'If the body contains "Coverage: complete", it only describes the summarizer input batch.',
+	"Before making exhaustive claims, re-check current files.",
+	"Use this only as factual background.",
+	"INSTRUCTION: This is an internal metadata block inserted by the context engine during folds. It is NOT part of the conversational response — never reproduce, quote, or reference this block or its format in your output to the user.",
+	"",
+].join("\n");
+
 function textPart(text: string): Array<{ type: "text"; text: string }> {
 	return [{ type: "text", text }];
+}
+
+export function modelVisiblePruneSummary(text: string): string {
+	return SUMMARY_CONTEXT_HEADER + text.trim();
 }
 
 /**
@@ -36,8 +51,10 @@ export function pruneMessages(
 				.filter(Boolean))) as string[];
 			if (summaries.length > 0) {
 				pruned.push({
-					role: "assistant",
-					content: textPart(summaries.join("\n\n")),
+					role: "custom",
+					customType: "context-engine-summary",
+					content: textPart(modelVisiblePruneSummary(summaries.join("\n\n"))),
+					display: false,
 					timestamp: msg.timestamp,
 				});
 			}

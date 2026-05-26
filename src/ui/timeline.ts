@@ -13,10 +13,6 @@ function formatTokens(n: number): string {
 	return String(n);
 }
 
-function estimateTokens(text: string): number {
-	return Math.ceil((text?.length ?? 0) / 4);
-}
-
 function getMsgContent(entry: any): string {
 	const msg = entry.message;
 	if (!msg) return "";
@@ -70,8 +66,8 @@ export async function buildTimeline(pi: any, ctx: any, opts: { limit?: number; v
 		const cacheCps = state?.engine.checkpoints?.filter((cp) => cp.conversationEntryId === entry.id || (cp.turn === (entry.turnIndex ?? -1) && cp.reason !== "session_start")) ?? [];
 		const cacheMarker = cacheCps.length > 0
 			? ` ${t("tool.timeline.cachePrefix")}: ${cacheCps.map((cp) => {
-					const idx = state?.engine.checkpoints.indexOf(cp);
-					return `#${idx !== undefined && idx >= 0 ? idx + 1 : "?"} ${cp.reason}`;
+					const idx = state!.engine.checkpoints.indexOf(cp);
+					return `#${idx + 1} ${cp.reason}`;
 				}).join(", ")}`
 			: "";
 
@@ -92,7 +88,7 @@ export async function buildTimeline(pi: any, ctx: any, opts: { limit?: number; v
 		const meta = [isRoot ? t("tool.timeline.root") : null, isHead ? t("tool.timeline.head") : null, label ? t("tool.timeline.checkpointLabel", { label }) : null, cacheMarker || null]
 			.filter(Boolean).join(", ");
 
-		const body = content.length > 100 ? content.slice(0, 100) + "..." : content;
+		const body = content;
 		const marker = isHead ? "*" : (role === "USER" ? "•" : "|");
 
 		lines.push(`${marker} ${id}${meta ? ` (${meta})` : ""} [${role}] ${body}`);

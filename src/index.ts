@@ -7,24 +7,24 @@ import { readContextPercent } from "./context-monitor.ts";
 import { HugeResultStore, maybeCapToolResult } from "./capper.ts";
 import { maybeRegisterDynamicProvider } from "./dynamic-provider.ts";
 import { createRuntimeState, type RuntimeState } from "./runtime-state.ts";
-import { ensureLookupTool, getDeepSeekCacheCompletions, registerCommands } from "./commands.ts";
+import { getCacheCompletions, registerCommands } from "./commands.ts";
 import { registerAgenticTools } from "./agentic/tools.ts";
 import { registerPruneTool, syncPruneToolActivation } from "./projection/prune-tool.ts";
 import { registerDashboardCommand } from "./ui/dashboard.ts";
 import { registerTimelineTool } from "./ui/timeline.ts";
-import { registerCompactToolRenderers } from "./ui/tool-renderers.ts";
 import { setStatus } from "./status.ts";
 import { persistTelemetry, restoreTelemetryFromSession } from "./telemetry-persistence.ts";
 import { PinStore, persistPinEntry, restorePinsFromSession } from "./context-pins/store.ts";
 import { registerPinTools } from "./context-pins/tools.ts";
 import { applyPinInjection, computeInjectionHash } from "./context-pins/injection.ts";
-import { detectTextualToolCall, handleBeforeAgentStart, handleBeforeProviderRequest, handleContext, handleMessageEnd, handleSessionBeforeCompact, handleToolCall, handleTurnEnd, registerFoldTool, registerParallelReadTool } from "./cache-engine/index.ts";
+import { clearRecentToolCalls, detectTextualToolCall, handleBeforeAgentStart, handleBeforeProviderRequest, handleContext, handleInput, handleMessageEnd, handleSessionBeforeCompact, handleToolCall, handleTurnEnd, registerFoldTool, registerParallelReadTool } from "./cache-engine/index.ts";
 import { annotateUsageForCurrentSegment, openCacheCheckpoint } from "./cache-engine/cache-checkpoints.ts";
 import { recordPostPruneImpact } from "./projection/prune-impact.ts";
 import { buildSessionContentMap } from "./projection/session-map.ts";
 import { t } from "./i18n/index.ts";
+import { safeAppendEntry, safeCall, safeCallAsync } from "./stale-context.ts";
 
-export { getDeepSeekCacheCompletions } from "./commands.ts";
+export { getCacheCompletions } from "./commands.ts";
 
 const CUSTOM_TYPE_HUGE_RESULT = "context-engine-huge-result";
 type PersistentHugeResultStore = HugeResultStore & {
@@ -44,10 +44,6 @@ export default async function deepSeekCache(pi: ExtensionAPI, initialCtx?: Exten
 	state.pinStore.setPersist((record) => persistPinEntry(pi, record));
 
 	if (state.config.registerDynamicProvider) state.dynamicModels = await maybeRegisterDynamicProvider(pi, state.config);
-	if (state.config.hugeResultCapper) {
-		ensureLookupTool(pi, store, state);
-		registerCompactToolRenderers(pi, store);
-	}
 	registerFoldTool(pi, state);
 	registerParallelReadTool(pi, state);
 
@@ -70,14 +66,13 @@ export default async function deepSeekCache(pi: ExtensionAPI, initialCtx?: Exten
 	registerPinTools(pi, state);
 	registerLifecycleHandlers(pi, withCtx, state, store);
 
-	restoreHugeResultsFromSession(currentCtx, store);
-	restorePinsFromSession(currentCtx, state.pinStore);
-	await refreshContextAndStatus(currentCtx, state);
+	safeRestoreHugeResultsFromSession(currentCtx, store);
+	safeRestorePinsFromSession(currentCtx, state);
+	await safeRefreshContextAndStatus(currentCtx, state);
 }
 
 function persistHugeResultEntry(pi: ExtensionAPI, record: any): void {
-	if (typeof (pi as any)?.appendEntry !== "function") return;
-	(pi as any).appendEntry(CUSTOM_TYPE_HUGE_RESULT, { version: 1, record });
+	safeAppendEntry(pi, CUSTOM_TYPE_HUGE_RESULT, { version: 1, record });
 }
 
 function restoreHugeResultsFromSession(ctx: any, store: PersistentHugeResultStore): number {
@@ -92,22 +87,30 @@ function restoreHugeResultsFromSession(ctx: any, store: PersistentHugeResultStor
 	return count;
 }
 
+function safeRestoreHugeResultsFromSession(ctx: any, store: PersistentHugeResultStore): number {
+	return safeCall(() => restoreHugeResultsFromSession(ctx, store), 0);
+}
+
+function safeRestorePinsFromSession(ctx: any, state: RuntimeState): number {
+	return safeCall(() => restorePinsFromSession(ctx, state.pinStore), 0);
+}
+
+async function safeRefreshContextAndStatus(ctx: any, state: RuntimeState): Promise<void> {
+	await safeCallAsync(() => refreshContextAndStatus(ctx, state), undefined);
+}
+
 function registerLifecycleHandlers(pi: ExtensionAPI, withCtx: (ctx?: any) => any, state: RuntimeState, store: PersistentHugeResultStore): void {
 	pi.on("session_start", async (_event: any, ctx: any) => {
 		const liveCtx = withCtx(ctx);
 		state.config = readConfig();
 		state.detection = detectDeepSeekModel(liveCtx?.model);
-		restoreHugeResultsFromSession(liveCtx, store);
-		restorePinsFromSession(liveCtx, state.pinStore);
-		if (state.config.hugeResultCapper) {
-			ensureLookupTool(pi, store, state);
-			registerCompactToolRenderers(pi, store);
-		}
+		safeRestoreHugeResultsFromSession(liveCtx, store);
+		safeRestorePinsFromSession(liveCtx, state);
 		registerFoldTool(pi, state);
 		registerParallelReadTool(pi, state);
 		registerPinTools(pi, state);
 		syncPruneToolActivation(pi, state.config);
-		await refreshContextAndStatus(liveCtx, state);
+		await safeRefreshContextAndStatus(liveCtx, state);
 	});
 
 	pi.on("model_select", async (_event: any, ctx: any) => {
@@ -117,7 +120,15 @@ function registerLifecycleHandlers(pi: ExtensionAPI, withCtx: (ctx?: any) => any
 		state.detection = detectDeepSeekModel(liveCtx?.model);
 		openCacheCheckpoint(state, "model_select", { modelId: state.detection.modelId, provider: state.detection.provider, previousModelId: previousDetection.modelId, startSegment: true });
 		persistTelemetry(pi, state);
-		await refreshContextAndStatus(liveCtx, state);
+		await safeRefreshContextAndStatus(liveCtx, state);
+	});
+
+	pi.on("input", async (event: any, ctx: any) => {
+		const liveCtx = withCtx(ctx);
+		state.config = readConfig();
+		if (!state.config.enabled) return { action: "continue" };
+		handleInput(event, liveCtx, state);
+		return { action: "continue" };
 	});
 
 	pi.on("before_agent_start", async (event: any, ctx: any) => {
@@ -135,21 +146,24 @@ function registerLifecycleHandlers(pi: ExtensionAPI, withCtx: (ctx?: any) => any
 		const pinResult = applyPinInjection(event, state);
 		const basePrompt = baseResult?.systemPrompt?.trim();
 		const pinPrompt = pinResult?.systemPrompt?.trim();
+		const baseMessage = baseResult?.message;
 
 		if (!pinPrompt) return baseResult ?? undefined;
-		if (!basePrompt) return { systemPrompt: pinPrompt };
-		return { systemPrompt: basePrompt + "\n\n" + pinPrompt };
+		if (!basePrompt) return { ...(baseMessage ? { message: baseMessage } : {}), systemPrompt: pinPrompt };
+		return { ...(baseMessage ? { message: baseMessage } : {}), systemPrompt: basePrompt + "\n\n" + pinPrompt };
 	});
 
 	pi.on("context", async (event: any, ctx: any) => {
 		const liveCtx = withCtx(ctx);
 		state.config = readConfig();
-		return handleContext(event, liveCtx, state);
+		const result = await handleContext(event, liveCtx, state, pi);
+		return result;
 	});
 
 	pi.on("session_before_compact", async (event: any, ctx: any) => {
 		const liveCtx = withCtx(ctx);
 		state.config = readConfig();
+		clearRecentToolCalls(state);
 		return handleSessionBeforeCompact(event, liveCtx, state);
 	});
 
@@ -161,8 +175,9 @@ function registerLifecycleHandlers(pi: ExtensionAPI, withCtx: (ctx?: any) => any
 		state.engine.pendingUsageModelId = state.engine.lastProviderModelId ?? state.detection.modelId;
 		state.engine.pendingUsageProvider = liveCtx?.model?.provider ?? state.detection.provider;
 		if (!state.config.diagnostics) return undefined;
-		state.lastPayload = inspectProviderPayload(event?.payload ?? event?.body ?? event);
-		if (state.config.persistDiagnostics) pi.appendEntry?.("context-engine.payload", state.lastPayload);
+		const requestIndex = (state.engine.providerRequestCount ?? 0) + 1;
+		state.engine.providerRequestCount = requestIndex;
+		state.lastPayload = inspectProviderPayload(event?.payload ?? event?.body ?? event, { requestIndex });
 		return undefined;
 	});
 
@@ -182,7 +197,7 @@ function registerLifecycleHandlers(pi: ExtensionAPI, withCtx: (ctx?: any) => any
 		if (!state.config.enabled) return undefined;
 		syncModelSelection(liveCtx, state);
 		const message = event?.message ?? event;
-		if (message?.role && message.role !== "assistant") return undefined;
+		if (message?.role && message.role !== "assistant") { return undefined; }
 		if (detectTextualToolCall(message)) liveCtx?.ui?.notify?.(t(state.config, "engine.tool.textualMissing"), "warning");
 		const snapshot = extractUsageSnapshot(message);
 		if (snapshot) snapshot.turn = state.engine.turnIndex;
@@ -191,8 +206,12 @@ function registerLifecycleHandlers(pi: ExtensionAPI, withCtx: (ctx?: any) => any
 		if (annotated) state.stats = addUsage(state.stats, annotated, annotated.modelId ?? state.detection.modelId, liveCtx?.model?.cost);
 		if (annotated) recordPostPruneImpact(state, annotated, liveCtx?.model?.cost);
 		if (annotated) persistTelemetry(pi, state);
+		if (state.config.persistDiagnostics && state.lastPayload) {
+			safeAppendEntry(pi, "context-engine.payload", state.lastPayload);
+			state.lastPayload = undefined;
+		}
 		await handleMessageEnd(event, pi, liveCtx, state);
-		await refreshContextAndStatus(liveCtx, state);
+		await safeRefreshContextAndStatus(liveCtx, state);
 		return undefined;
 	});
 
@@ -206,7 +225,7 @@ function registerLifecycleHandlers(pi: ExtensionAPI, withCtx: (ctx?: any) => any
 		if (annotated && state.stats.requests === 0) state.stats = addUsage(state.stats, annotated, annotated.modelId ?? state.detection.modelId, liveCtx?.model?.cost);
 		if (annotated) recordPostPruneImpact(state, annotated, liveCtx?.model?.cost);
 		if (annotated) persistTelemetry(pi, state);
-		await refreshContextAndStatus(liveCtx, state);
+		await safeRefreshContextAndStatus(liveCtx, state);
 		return undefined;
 	});
 
@@ -214,7 +233,7 @@ function registerLifecycleHandlers(pi: ExtensionAPI, withCtx: (ctx?: any) => any
 		const liveCtx = withCtx(ctx);
 		state.config = readConfig();
 		await handleTurnEnd(_event, pi, liveCtx, state);
-		await refreshContextAndStatus(liveCtx, state);
+		await safeRefreshContextAndStatus(liveCtx, state);
 		return undefined;
 	});
 
@@ -222,7 +241,7 @@ function registerLifecycleHandlers(pi: ExtensionAPI, withCtx: (ctx?: any) => any
 		openCacheCheckpoint(state, "compact", { startSegment: true });
 		state.stats = markCompaction(state.stats, { turn: state.engine.turnIndex, reason: "host", completed: true });
 		persistTelemetry(pi, state);
-		await refreshContextAndStatus(withCtx(ctx), state);
+		await safeRefreshContextAndStatus(withCtx(ctx), state);
 		return undefined;
 	});
 }

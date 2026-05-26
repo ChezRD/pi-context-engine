@@ -11,7 +11,6 @@ import { captureBatches, captureTurnEndBatch, hasAssistantToolCalls, shouldTrigg
 import { recordPruneSummarizeImpact } from "../projection/prune-impact.ts";
 import { appendPruneDebugEntry, persistTelemetry } from "../telemetry-persistence.ts";
 import { isReplacementSummaryEfficient } from "../projection/tool-pruner.ts";
-import { emitPruneSummaryMessage } from "../projection/prune-tool.ts";
 import { rebuildPrunedContextFromSession } from "../projection/rebuild.ts";
 
 function notify(ctx: any, text: string, level: "info" | "warning" | "error" = "warning"): void {
@@ -42,7 +41,7 @@ export async function requestFold(pi: any, ctx: any, state: RuntimeState, opts?:
 		}, 500);
 		try {
 			const raw = ctx.compact({
-				...compactOptions({ ...state.config, autoFold: true }, ctx),
+				...compactOptions({ ...state.config, autoFold: true }, ctx, state),
 				onComplete: (result: any) => {
 					clearTimeout(timer);
 					state.stats = markCompaction(state.stats, { turn: state.engine.turnIndex, reason: "auto", completed: true });
@@ -65,7 +64,7 @@ export async function requestFold(pi: any, ctx: any, state: RuntimeState, opts?:
 			}
 		} catch (error) {
 			clearTimeout(timer);
-			resolve({ ok: false, error: error instanceof Error ? error.message : String(error) });
+			resolve({ ok: false, error: (error as Error).message });
 		}
 	});
 
@@ -81,6 +80,7 @@ export function requestCompact(ctx: any, state: RuntimeState): { ok: true } | { 
 	if (typeof ctx?.compact !== "function") return { ok: false, error: t("engine.compactUnavailable") };
 	try {
 		ctx.compact({
+			...compactOptions({ ...state.config, autoFold: true }, ctx, state),
 			onComplete: (result: any) => {
 				state.stats = markCompaction(state.stats, { turn: state.engine.turnIndex, reason: "manual", completed: true });
 				activateAppendOnlyProjectionFromCompact(result, state);
@@ -92,7 +92,7 @@ export function requestCompact(ctx: any, state: RuntimeState): { ok: true } | { 
 			},
 		});
 	} catch (error) {
-		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+		return { ok: false, error: (error as Error).message };
 	}
 	state.engine.lastCompactTurn = state.engine.turnIndex;
 	state.engine.compactCount++;
@@ -116,9 +116,13 @@ function choiceText(state: RuntimeState, status: ReturnType<typeof buildContextS
 	return t("engine.notify.choice", { pct, hit, turns, saved: state.stats.savings.toFixed(4), compact: estimateCompactMissCost(state).toFixed(4) });
 }
 
+function pendingToolCallCount(state: RuntimeState): number {
+	return state.engine.prune.pendingBatches.reduce((sum, batch) => sum + batch.toolCalls.length, 0);
+}
+
 export async function handleTurnEnd(pi: any, ctx: any, state: RuntimeState, event?: any): Promise<void> {
 	if (!state.config.enabled) return;
-	
+
 	// Reset foldedThisTurn flag for new turn
 	state.engine.semanticFold.foldedThisTurn = false;
 
@@ -136,8 +140,8 @@ export async function handleTurnEnd(pi: any, ctx: any, state: RuntimeState, even
 		if (postDecision.kind === "exit-with-summary") {
 			notify(ctx, t("engine.foldExitSummary"), "warning");
 			await requestFold(pi, ctx, state, { aggressive: true, reason: "exit-summary" });
-			// Abort current turn loop — force the agent to start fresh with summary context
-			ctx.abort?.();
+			// Keep the current agent loop alive; the next provider call will see the folded projection.
+			// Aborting here turns a recoverable high-context fold into a no-final-answer print run.
 			return;
 		}
 	}
@@ -147,7 +151,10 @@ export async function handleTurnEnd(pi: any, ctx: any, state: RuntimeState, even
 		await requestFold(pi, ctx, state, { aggressive: status.decision === "force_fold" });
 		return;
 	}
-	if (status.zone === "orange" || status.zone === "red" || status.zone === "critical") notify(ctx, choiceText(state, status), "warning");
+	if (status.zone === "orange" || status.zone === "red" || status.zone === "critical") {
+		const text = choiceText(state, status);
+		notify(ctx, text, "warning");
+	}
 }
 
 async function runAutoPrune(pi: any, ctx: any, state: RuntimeState, event?: any): Promise<void> {
@@ -158,12 +165,15 @@ async function runAutoPrune(pi: any, ctx: any, state: RuntimeState, event?: any)
 			const capturedFromTurnEnd = captureTurnEndBatch(event, skipIds, state.engine.prune, state.engine.turnIndex);
 			const branch = await ctx?.sessionManager?.getBranch?.();
 			let lastAssistant = event?.message?.role === "assistant" ? event.message : undefined;
+			const pendingBeforeBranch = pendingToolCallCount(state);
 			if (branch) {
 				captureBatches(branch, skipIds, state.engine.prune, state.engine.turnIndex, { bridgeLength: state.config.pruneBridgeLength });
 				lastAssistant = [...branch].reverse().map((entry: any) => entry.message).find((msg: any) => msg?.role === "assistant") ?? lastAssistant;
 			}
+			const capturedFromBranch = Math.max(0, pendingToolCallCount(state) - pendingBeforeBranch);
 
-			const hadTools = capturedFromTurnEnd > 0 || Boolean(lastAssistant && hasAssistantToolCalls(lastAssistant));
+			const eventHadToolCalls = Boolean(event?.message && hasAssistantToolCalls(event.message));
+			const hadTools = capturedFromTurnEnd > 0 || capturedFromBranch > 0 || eventHadToolCalls || Boolean(lastAssistant && hasAssistantToolCalls(lastAssistant));
 			if (hadTools) state.engine.prune.batchStepCounter++;
 			const hasPendingTools = state.engine.prune.pendingBatches.some((batch) => batch.toolCalls.length > 0);
 			const lastAssistantPureText = Boolean(lastAssistant && !hasAssistantToolCalls(lastAssistant));
@@ -178,12 +188,13 @@ async function runAutoPrune(pi: any, ctx: any, state: RuntimeState, event?: any)
 				return;
 			}
 
-			if (checkpointTriggered || shouldTriggerPrune(state.config.pruneOn, state.engine.prune.batchStepCounter, state.config.pruneBatchSize, hasPendingTools, lastAssistantPureText)) {
-				notify(ctx, t(state.config, "tool.prune.started"), "info");
-				await flushPendingPrune(pi, ctx, state);
-			}
+			const shouldPrune = checkpointTriggered || shouldTriggerPrune(state.config.pruneOn, state.engine.prune.batchStepCounter, state.config.pruneBatchSize, hasPendingTools, lastAssistantPureText);
+				if (shouldPrune) {
+					notify(ctx, t(state.config, "tool.prune.started"), "info");
+					await flushPendingPrune(pi, ctx, state);
+				}
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
+			const message = (error as Error).message;
 			state.engine.prune.impact.lastErrorKey = "engine.prune.error.unexpected";
 			notify(ctx, t("engine.prune.failed", { error: message }), "warning");
 			persistTelemetry(pi, state);
@@ -196,14 +207,26 @@ function isFinalAssistantMessage(message: any): boolean {
 }
 
 export async function handleAgentMessagePrune(pi: any, ctx: any, state: RuntimeState, event?: any): Promise<void> {
-	if (!state.config.enabled || !state.config.pruneEnabled || state.config.pruneOn !== "agent-message") return;
-	if (!isFinalAssistantMessage(event?.message ?? event)) return;
+	if (!state.config.enabled || !state.config.pruneEnabled || state.config.pruneOn !== "agent-message") { return; }
+	if (!isFinalAssistantMessage(event?.message ?? event)) { return; }
 	const target = Math.max(1, state.config.pruneBatchSize);
 	const hasPendingTools = state.engine.prune.pendingBatches.some((batch) => batch.toolCalls.length > 0);
-	if (!hasPendingTools || state.engine.prune.batchStepCounter < target) return;
+	if (!hasPendingTools || state.engine.prune.batchStepCounter < target) { return; }
 	state.engine.prune.awaitingAgentMessage = false;
 	notify(ctx, t(state.config, "tool.prune.started"), "info");
 	await flushPendingPrune(pi, ctx, state);
+}
+
+export async function flushAgentMessagePruneAtAgentStart(pi: any, ctx: any, state: RuntimeState): Promise<boolean> {
+	if (!state.config.enabled || !state.config.pruneEnabled || state.config.pruneOn !== "agent-message") return false;
+	if (state.config.pruneAgentMessageFallback !== "next-agent-start") return false;
+	const target = Math.max(1, state.config.pruneBatchSize);
+	const hasPendingTools = state.engine.prune.pendingBatches.some((batch) => batch.toolCalls.length > 0);
+	if (!state.engine.prune.awaitingAgentMessage || !hasPendingTools || state.engine.prune.batchStepCounter < target || state.engine.prune.isFlushing) return false;
+	state.engine.prune.awaitingAgentMessage = false;
+	notify(ctx, t(state.config, "tool.prune.started"), "info");
+	await flushPendingPrune(pi, ctx, state);
+	return true;
 }
 
 export async function flushAgentMessagePruneFallback(pi: any, ctx: any, state: RuntimeState): Promise<boolean> {
@@ -221,9 +244,9 @@ export async function flushAgentMessagePruneFallback(pi: any, ctx: any, state: R
 	return true;
 }
 
-async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promise<void> {
-	if (state.engine.prune.pendingBatches.length === 0) return;
-	if (state.engine.prune.isFlushing) return;
+export async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promise<void> {
+	if (state.engine.prune.pendingBatches.length === 0) { return; }
+	if (state.engine.prune.isFlushing) { return; }
 	state.engine.prune.isFlushing = true;
 	const flushingBatches = state.engine.prune.pendingBatches.map((batch) => ({
 		...batch,
@@ -256,7 +279,6 @@ async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promis
 		let summarized = 0;
 		let skippedOversized = 0;
 		state.engine.prune.impact.lastNoOpToolCalls = 0;
-		const acceptedSummaries: string[] = [];
 		for (let i = 0; i < flushingBatches.length; i++) {
 			const result = results[i];
 			if (result) {
@@ -273,7 +295,6 @@ async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promis
 				}
 
 				let wroteSummaryForBatch = false;
-				if (result.summaryText.trim()) acceptedSummaries.push(result.summaryText.trim());
 				for (const tc of batch.toolCalls) {
 					if (!state.engine.prune.summarizedIds.includes(tc.id)) {
 						state.engine.prune.summarizedIds.push(tc.id);
@@ -286,14 +307,6 @@ async function flushPendingPrune(pi: any, ctx: any, state: RuntimeState): Promis
 					}
 				}
 			}
-		}
-		if (acceptedSummaries.length > 0) {
-			emitPruneSummaryMessage(
-				pi,
-				ctx,
-				Array.from(new Set(acceptedSummaries)).join("\n\n"),
-				{ batches: flushingBatches.length, mode: state.config.pruneOn },
-			);
 		}
 		if (state.config.persistDiagnostics && pool.metrics.requests > 0) {
 			appendPruneDebugEntry(pi, {

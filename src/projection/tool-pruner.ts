@@ -3,7 +3,7 @@
  * Ported from pi-context-prune summarizer.ts.
  */
 import { actualCostUsd, deepSeekOfficialCost } from "../stats.ts";
-import { extractModelVisibleSection, isModelVisibleContext } from "../model-visible.ts";
+import { extractModelVisibleMetadata, extractModelVisibleSection, isModelVisibleContext } from "../model-visible.ts";
 import {
 	CONTEXT_RESULT_LOOKUP_TOOL,
 	DUPLICATE_SKIP_INTERNAL_MARKER,
@@ -61,9 +61,12 @@ Evidence rules:
 - If a file was generated with numbered lines, that still does not let you map character offsets to line numbers unless the fetched result explicitly shows the relevant line boundaries.
 - If assistant narration claims "all", "every", "complete", or "without shortcuts", only preserve that as fact when the tool calls/results prove contiguous coverage.
 - If offsets, ranges, refs, or file chunks have gaps, state the exact observed ranges and mark the work as partial.
-- If any requested or implied tail chunk was not fetched, or any middle range was skipped, coverage cannot be complete.
-- Never turn an assistant plan or self-report into a completed fact unless a matching tool result confirms it.
-- Use Result metadata lines as machine evidence for ref, offset, limit, returned chars, total chars, and has_more.
+ - If any requested or implied tail chunk was not fetched, or any middle range was skipped, coverage cannot be complete.
+ - Never turn an assistant plan or self-report into a completed fact unless a matching tool result confirms it.
+ - If any tool_call has evidence_strength="weak", keep completion claims conservative for that call.
+ - evidence_claim_strength="weak", bounded_excerpt_without_total_proof=true, has_unfetched_tail=true, and has_gap=true are blockers for complete summaries.
+ - For plain read/context_result_lookup calls with explicit offset/limit and no metadata_proves_complete, treat evidence as bounded until full interval proof appears.
+ - Use Result metadata lines as machine evidence for ref, offset, limit, returned chars, total chars, and has_more.
 - When several lookup slices cover different source_ref values, preserve a compact mapping such as "dsc-read-2 -> pi-context-engine README head" when that mapping is proven by args/result_excerpt. Avoid generic phrases like "many files" when the refs can be grounded more concretely.
 - When source_ref values are absent or noisy but path_hint values are available, preserve a compact file inventory such as "cache-engine/index.ts -> bounded excerpt" or "pi-context-prune/README.md -> full read".
 - If carry_forward_inventory is present, use it to understand which refs were already shown in earlier summarize requests. Do not assume the current request contains the first slice for those refs.
@@ -100,6 +103,9 @@ const MAX_SUMMARY_RESULT_CHARS = 1200;
 const MAX_ARGS_CHARS = 320;
 
 interface StructuredToolCallPayload {
+	evidence_strength: "weak" | "strong";
+	evidence_flags: string[];
+	evidence_metadata?: Record<string, unknown>;
 	id: string;
 	tool_name: string;
 	turn_index?: number;
@@ -126,6 +132,8 @@ interface StructuredBatchPayload {
 	batch_index: number;
 	turn_index: number;
 	batch_context?: string;
+	evidence_strength: "weak" | "strong";
+	evidence_flags: string[];
 	coverage_hints: string[];
 	tool_calls: StructuredToolCallPayload[];
 }
@@ -166,15 +174,6 @@ function compactLongBody(body: string, budget: number): string {
 
 function compactNormalizedResult(text: string): string {
 	if (text.length <= MAX_SUMMARY_RESULT_CHARS) return text;
-	if (text.startsWith("Result metadata: ")) {
-		const newline = text.indexOf("\n");
-		if (newline > 0) {
-			const metadata = text.slice(0, newline);
-			const body = text.slice(newline + 1);
-			const remainingBudget = Math.max(120, MAX_SUMMARY_RESULT_CHARS - metadata.length - 1);
-			return `${metadata}\n${compactLongBody(body, remainingBudget)}`.trim();
-		}
-	}
 	return compactLongBody(text, MAX_SUMMARY_RESULT_CHARS);
 }
 
@@ -206,16 +205,6 @@ function trimRepeatedLookupContent(current: string, previous: string, ref: strin
 	return { display: current, merged: `${previous}\n${current}`.trim() };
 }
 
-function compactResultForSummary(text: string, seenResults: Map<string, string>, toolName: string): string {
-	const normalized = normalizeToolResultForSummary(text).trim();
-	if (!normalized) return "";
-	const dedupeKey = `${toolName}\n${normalized}`;
-	const firstSeenTool = seenResults.get(dedupeKey);
-	if (firstSeenTool) return `[same result as earlier ${firstSeenTool} output in this prune request]`;
-	seenResults.set(dedupeKey, toolName);
-	return compactNormalizedResult(normalized);
-}
-
 function compactArgsForSummary(toolName: string, args: string): string {
 	const trimmed = args.trim();
 	if (!trimmed) return trimmed;
@@ -224,7 +213,7 @@ function compactArgsForSummary(toolName: string, args: string): string {
 	const target = trimmed.match(/(?:cat|tee)\s*>\s*([^\s]+)|(?:>|>>)\s*([^\s]+)/)?.slice(1).find(Boolean);
 	const sources = Array.from(trimmed.matchAll(/\/home\/chez\/projects\/pi-extensions\/pi-context-engine\/[^\s"'`]+/g)).map((match) => match[0]);
 	const uniqueSources = Array.from(new Set(sources)).slice(0, 4);
-	const firstLine = trimmed.split("\n", 1)[0]?.slice(0, 140) ?? trimmed.slice(0, 140);
+	const firstLine = trimmed.split("\n", 1)[0].slice(0, 140);
 	const notes = [
 		firstLine,
 		target ? `target=${target}` : "",
@@ -272,6 +261,18 @@ function extractNormalizedResultMetadata(text: string): { metadata?: Record<stri
 	};
 }
 
+function extractEvidenceMetadataFromResult(text: string): Record<string, unknown> | undefined {
+	const normalized = normalizeToolResultForSummary(text).trim();
+	const prefix = /^Evidence metadata:\s*(\{.*\})/i.exec(normalized);
+	if (!prefix) return undefined;
+	try {
+		const parsed = JSON.parse(prefix[1]);
+		return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function neutralizeSliceContent(body: string | undefined): string | undefined {
 	if (!body) return body;
 	let next = body;
@@ -298,6 +299,25 @@ function buildCoverageHints(toolName: string, args: string | undefined, result: 
 	return Array.from(hints);
 }
 
+function inferEvidenceStrengthFromCall(
+	toolName: string,
+	args: string | undefined,
+	metadata: Record<string, unknown> | undefined,
+	evidenceMetadata: Record<string, unknown> | undefined,
+	hints: string[],
+	hasMore: boolean,
+): "weak" | "strong" {
+	const explicitLimit = /"limit"\s*:\s*\d+/i.test(args ?? "");
+	const explicitOffset = /"offset"\s*:\s*[1-9]\d*/i.test(args ?? "");
+	const boundedRead = /^read$/i.test(toolName) && (explicitOffset || explicitLimit) && !(metadataShowsFullSlice(metadata));
+	const claimStrength = typeof evidenceMetadata?.claim_strength === "string" ? evidenceMetadata.claim_strength.toLowerCase() : undefined;
+	const hasWeakMarker = claimStrength === "weak" || hints.includes("has_more_true") || hints.includes("continuation_hint") || hints.includes("truncated_or_partial");
+	const hasGapMarker = hints.includes("nonzero_offset") || hints.includes("narration_mentions_incomplete_or_claims");
+	const boundedWithoutProof = (hints.includes("bounded_excerpt_without_total_proof") || hints.includes("has_unfetched_tail") || hints.includes("has_gap")) && !metadataShowsFullSlice(metadata);
+	if (boundedRead || boundedWithoutProof || hasWeakMarker || hasGapMarker || hasMore) return "weak";
+	return "strong";
+}
+
 function metadataShowsFullSlice(metadata: Record<string, unknown> | undefined): boolean {
 	if (!metadata) return false;
 	const offset = typeof metadata.offset === "number" ? metadata.offset : 0;
@@ -318,6 +338,7 @@ function buildStructuredToolCallPayload(toolCall: ToolBatch["toolCalls"][number]
 	const { body: bodyWithoutUiHint, hasLegacyUiHint } = stripLegacyUiContinuationHint(body);
 	const toolName = String(toolCall.name ?? "unknown");
 	const coverageHints = buildCoverageHints(toolName, toolCall.args, toolCall.result, facts);
+	const evidenceMetadata = extractEvidenceMetadataFromResult(toolCall.result ?? "");
 	const sourceRef = typeof metadata?.ref === "string"
 		? metadata.ref
 		: facts?.ref
@@ -342,6 +363,24 @@ function buildStructuredToolCallPayload(toolCall: ToolBatch["toolCalls"][number]
 		|| coverageHints.includes("truncated_or_partial"));
 	const hasGap = coverageHints.includes("nonzero_offset")
 		|| coverageHints.includes("narration_mentions_incomplete_or_claims");
+	const evidenceFlags = [
+		...coverageHints,
+		...(boundedExcerptWithoutTotalProof ? ["bounded_excerpt_without_total_proof"] : []),
+		...(hasUnfetchedTail ? ["has_unfetched_tail"] : []),
+		...(hasGap ? ["has_gap"] : []),
+		...(facts?.hasMore === true ? ["has_more_true"] : []),
+	];
+	if (typeof evidenceMetadata?.claim_strength === "string") {
+		evidenceFlags.push(`evidence_claim_strength_${evidenceMetadata.claim_strength.toString().toLowerCase()}`);
+	}
+	const evidenceStrength = inferEvidenceStrengthFromCall(
+		toolName,
+		toolCall.args,
+		metadata,
+		evidenceMetadata,
+		evidenceFlags,
+		hasMore,
+	);
 	return {
 		id: String(toolCall.id ?? toolName),
 		tool_name: toolName,
@@ -351,6 +390,9 @@ function buildStructuredToolCallPayload(toolCall: ToolBatch["toolCalls"][number]
 		call_context: includeContext ? toolCall.context?.slice(0, 600) : undefined,
 		result_metadata: metadata,
 		result_excerpt: normalizedBody ? compactNormalizedResult(normalizedBody) : undefined,
+		evidence_metadata: evidenceMetadata,
+		evidence_strength: evidenceStrength,
+		evidence_flags: evidenceFlags,
 		has_ui_continuation_hint: hasLegacyUiHint,
 		context_kind: isLookupSlice ? "lookup-slice" : isReadSlice ? "read-slice" : "tool-result",
 		offset_kind: isLookupSlice || isReadSlice ? "char_slice" : metadata?.offset != null ? "unknown" : "n/a",
@@ -369,15 +411,21 @@ function buildStructuredToolCallPayload(toolCall: ToolBatch["toolCalls"][number]
 function buildStructuredBatchPayload(batch: ToolBatch, batchIndex: number, includeContext = true): StructuredBatchPayload {
 	const toolCalls = batch.toolCalls.map((toolCall) => buildStructuredToolCallPayload(toolCall, includeContext));
 	const coverageHints = new Set<string>();
+	let batchEvidenceStrength: StructuredToolCallPayload["evidence_strength"] = "strong";
+	const batchEvidenceFlags = new Set<string>();
 	for (const toolCall of toolCalls) {
 		for (const hint of toolCall.coverage_hints) coverageHints.add(hint);
 		if (toolCall.has_unfetched_tail) coverageHints.add("has_unfetched_tail");
 		if (toolCall.has_gap) coverageHints.add("has_gap");
+		if (toolCall.evidence_strength === "weak") batchEvidenceStrength = "weak";
+		for (const flag of toolCall.evidence_flags ?? []) batchEvidenceFlags.add(flag);
 	}
 	return {
 		batch_index: batchIndex,
 		turn_index: batch.turnIndex,
 		batch_context: includeContext ? batch.context?.slice(0, 1200) : undefined,
+		evidence_strength: batchEvidenceStrength,
+		evidence_flags: Array.from(batchEvidenceFlags),
 		coverage_hints: Array.from(coverageHints),
 		tool_calls: toolCalls,
 	};
@@ -441,7 +489,7 @@ export function normalizeToolResultForSummary(text: string): string {
 		const bodyLooksLikeSameHeader = body === trimmed || body.trim() === header.trim();
 		return body && !bodyLooksLikeSameHeader ? `Result metadata: ${normalizedHeader}\n${body}` : `Result metadata: ${normalizedHeader}`;
 	}
-	const lookup = extractModelVisibleSection(trimmed, "lookup");
+	const lookup = extractModelVisibleSection(trimmed, "slice_metadata") ?? extractModelVisibleSection(trimmed, "lookup");
 	const metadata = lookup ? firstContextResultLookupHeader(lookup) : undefined;
 	if (lookup) {
 		const normalizedLookup = stripLookupHeader(lookup).trim();
@@ -453,6 +501,10 @@ export function normalizeToolResultForSummary(text: string): string {
 	if (preview) {
 		const result = preview.trim();
 		return metadata ? `Result metadata: ${normalizeLookupMetadata(metadata)}\n${result}` : result;
+	}
+	const output = extractModelVisibleSection(trimmed, "output");
+	if (output) {
+		return `Evidence metadata: ${JSON.stringify(extractModelVisibleMetadata(trimmed) ?? {})}\n${output.trim()}`;
 	}
 	return stripLookupHeader(trimmed);
 }
@@ -669,7 +721,7 @@ export function buildPoolPrompt(
 	return `${systemPrompt}\n\nInput JSON:\n${JSON.stringify(payload, null, 2)}`;
 }
 
-function summaryTextFromItem(item: any): string {
+function summaryTextFromItem(item: any, batchEvidence?: BatchEvidenceState): string {
 	if (typeof item === "string") return item.trim();
 	const content = contentText(item?.summary ?? item?.summaryText ?? item?.text ?? item?.content ?? item?.markdown);
 	const summary = content.trim();
@@ -683,13 +735,46 @@ function summaryTextFromItem(item: any): string {
 	else if (summaryCoverage) lines.push(`Coverage: ${summaryCoverage}`);
 	if (summaryBody) lines.push(summaryBody);
 	for (const item of evidence.slice(0, 3)) lines.push(`- Evidence: ${item}`);
-	return repairCoverageConsistency(lines.join("\n").trim());
+	return enforceEvidenceConservativeCoverage(repairCoverageConsistency(lines.join("\n").trim()), batchEvidence);
 }
 
 function repairCoverageConsistency(summary: string): string {
 	if (!/^Coverage:\s*complete\b/im.test(summary)) return summary;
 	if (!/\b(skipped|missing|unread|unfetched|incomplete|gap|not read|not fetched|partial verification|bounded excerpt|partially read|tail missing|offset=\d+|continuation available)\b/i.test(summary)) return summary;
 	return summary.replace(/^Coverage:\s*complete\b/im, "Coverage: partial");
+}
+
+interface BatchEvidenceState {
+	evidenceStrength: "weak" | "strong";
+	evidenceFlags: string[];
+}
+
+function inferBatchEvidence(batch: ToolBatch): BatchEvidenceState {
+	const toolCalls = batch.toolCalls.map((toolCall) => buildStructuredToolCallPayload(toolCall, false));
+	const evidenceFlags = new Set<string>();
+	let evidenceStrength: "weak" | "strong" = "strong";
+	for (const toolCall of toolCalls) {
+		if (toolCall.evidence_strength === "weak") evidenceStrength = "weak";
+		for (const flag of toolCall.evidence_flags ?? []) evidenceFlags.add(flag);
+	}
+	return { evidenceStrength, evidenceFlags: Array.from(evidenceFlags) };
+}
+
+function enforceEvidenceConservativeCoverage(summary: string, batchEvidence?: BatchEvidenceState): string {
+	if (!summary) return summary;
+	if (batchEvidence?.evidenceStrength !== "weak") return summary;
+	if (!/^Coverage:\s*complete\b/im.test(summary)) return summary;
+	const downgraded = summary.replace(/^Coverage:\s*complete\b/i, "Coverage: partial");
+	const warning = "Evidence coverage flags are weak or bounded; keep conclusions scoped.";
+	return repairCoverageConsistency(downgraded.includes("Evidence:") ? downgraded : `${downgraded}\n- ${warning}`);
+}
+
+function needsQualityRetry(batch: ToolBatch, summary: string, batchEvidence?: BatchEvidenceState): boolean {
+	const claimsComplete = /^Coverage:\s*complete\b/im.test(summary) || /\b(full|entire|all|complete)\b/i.test(summary);
+	if (batchEvidence?.evidenceStrength === "weak" && claimsComplete) return true;
+	if (!batchEvidence?.evidenceFlags.length) return hasWeakGrounding(batch, summary) || hasUnsupportedReadCompleteness(batch, summary);
+	const evidenceRisk = batchEvidence.evidenceFlags.some((flag) => flag.includes("evidence_claim_strength_weak") || flag.includes("bounded_excerpt_without_total_proof") || flag.includes("has_unfetched_tail") || flag.includes("has_gap"));
+	return evidenceRisk && claimsComplete || hasWeakGrounding(batch, summary) || hasUnsupportedReadCompleteness(batch, summary);
 }
 
 function batchSourceRefs(batch: ToolBatch): string[] {
@@ -716,7 +801,7 @@ function hasWeakGrounding(batch: ToolBatch, summary: string): boolean {
 	return refs.length >= 3 && refMentions < Math.min(2, refs.length) && pathMentions < Math.min(2, pathHints.length || 0);
 }
 
-function hasUnsupportedReadCompleteness(batch: ToolBatch, summary: string): boolean {
+export function hasUnsupportedReadCompleteness(batch: ToolBatch, summary: string): boolean {
 	const boundedHints = new Map<string, true>();
 	for (const toolCall of batch.toolCalls) {
 		if (!/^read$/i.test(String(toolCall.name ?? ""))) continue;
@@ -740,10 +825,6 @@ function hasUnsupportedReadCompleteness(batch: ToolBatch, summary: string): bool
 		}
 	}
 	return false;
-}
-
-function needsQualityRetry(batch: ToolBatch, summary: string): boolean {
-	return hasWeakGrounding(batch, summary) || hasUnsupportedReadCompleteness(batch, summary);
 }
 
 function extractSummaryItems(parsed: any): any[] {
@@ -838,9 +919,10 @@ export async function summarizeToolBatchPool(
 		const parsed = extractJson(text);
 		const malformedSingle = !parsed && batches.length === 1 ? extractMalformedSingleSummary(text) : undefined;
 		const summaries = malformedSingle ? [malformedSingle] : extractSummaryItems(parsed);
+		const batchEvidence = batches.map((batch) => inferBatchEvidence(batch));
 		const results = batches.map((_, index) => {
 			const item = summaries.find((summary: any) => Number(summary?.batchIndex ?? summary?.index) === index) ?? summaries[index];
-			const summaryText = summaryTextFromItem(item) || (batches.length === 1 && !looksLikeStructuredJsonAttempt(text) ? text.trim() : "");
+			const summaryText = summaryTextFromItem(item, batchEvidence[index]) || (batches.length === 1 && !looksLikeStructuredJsonAttempt(text) ? text.trim() : "");
 			return summaryText ? { summaryText, usage } : null;
 		});
 		const hasUsableSummaries = results.some(Boolean);
@@ -881,7 +963,7 @@ export async function summarizeToolBatchPool(
 
 		if (!opts?.qualityRetry) {
 			const invalidIndexes = failSoftResults
-				.map((result, index) => result?.summaryText && needsQualityRetry(batches[index], result.summaryText) ? index : -1)
+				.map((result, index) => result?.summaryText && needsQualityRetry(batches[index], result.summaryText, batchEvidence[index]) ? index : -1)
 				.filter((index) => index >= 0);
 			if (invalidIndexes.length > 0) {
 				const retried = await Promise.all(invalidIndexes.map((index) =>

@@ -1,7 +1,10 @@
 import { Type } from "typebox";
 import type { RuntimeState } from "../runtime-state.ts";
 import { requestFold } from "./auto-compact.ts";
+import { clearRecentToolCalls } from "./tool-stability.ts";
 import { t } from "../i18n/index.ts";
+
+const FOLD_PROMPT_SNIPPET = "Fold old conversation history when context is high to preserve cache utility. Never output `<context-engine-summary>` blocks to the user — they are internal fold artifacts.";
 
 export function registerFoldTool(pi: any, state: RuntimeState): void {
 	if (state.engine.foldToolRegistered) return;
@@ -10,12 +13,13 @@ export function registerFoldTool(pi: any, state: RuntimeState): void {
 		name: "context_cache_fold",
 		label: t("tool.fold.label"),
 		description: t("tool.fold.description"),
-		promptSnippet: t("tool.fold.promptSnippet"),
+		promptSnippet: FOLD_PROMPT_SNIPPET,
 		parameters: Type.Object({ customInstructions: Type.Optional(Type.String({ description: t("tool.fold.customInstructions") })) }),
 		async execute(_toolCallId: string, params: { customInstructions?: string }, _signal: AbortSignal, _onUpdate: unknown, ctx: any) {
 			const previous = state.config.autoFold;
 			state.config = { ...state.config, autoFold: true };
 			const result = await requestFold(pi, params.customInstructions ? { ...ctx, compact: (options: any) => ctx.compact({ ...options, customInstructions: params.customInstructions }) } : ctx, state);
+			clearRecentToolCalls(state);
 			state.config = { ...state.config, autoFold: previous };
 			return { content: [{ type: "text", text: result.ok ? t("tool.fold.triggered") : t("tool.fold.failed", { error: result.error }) }], details: { ok: result.ok } };
 		},

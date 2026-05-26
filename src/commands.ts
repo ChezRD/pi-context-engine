@@ -38,7 +38,7 @@ const ARGUMENT_HINT = "status | diagnose | fold | compact | hold | prune | confi
 type NotifyLevel = "info" | "warning" | "error";
 interface CommandResult { text: string; level: NotifyLevel; }
 
-export function getDeepSeekCacheCompletions(prefix: string): Array<{ value: string; label: string; description: string }> | null {
+export function getCacheCompletions(prefix: string): Array<{ value: string; label: string; description: string }> | null {
 	const trimmed = prefix.trimStart();
 	if (trimmed.includes(" ")) return null;
 	const filtered = SUBCOMMANDS.filter((item) => item.value.startsWith(trimmed));
@@ -49,7 +49,7 @@ export function registerCommands(pi: any, getCtx: () => any, state: RuntimeState
 	const definition = {
 		description: t(undefined, "cmd.description"),
 		argumentHint: ARGUMENT_HINT,
-		getArgumentCompletions: getDeepSeekCacheCompletions,
+		getArgumentCompletions: getCacheCompletions,
 		handler: async (args: string, commandCtx?: any) => executeSubcommand(pi, getCtx, state, store, indexer, args, commandCtx),
 	};
 	pi.registerCommand(COMMAND, definition);
@@ -119,7 +119,11 @@ async function configNow(pi: any, ctx: any, state: RuntimeState): Promise<Comman
 }
 
 function buildDiagnose(pi: any, state: RuntimeState): string {
-	return [buildDetailedStatus(pi, state), "", formatPayloadDiagnostics(state.lastPayload, state.config), "", formatPruneSummarizerTrace(state)].join("\n");
+	return [
+		buildDetailedStatus(pi, state),
+		formatPayloadDiagnostics(state.lastPayload, state.config),
+		formatPruneSummarizerTrace(state),
+	].filter((section) => section.trim().length > 0).join("\n\n");
 }
 
 export function ensureLookupTool(pi: any, store: HugeResultStore, state: RuntimeState): void {
@@ -143,7 +147,7 @@ async function pruneNow(pi: any, ctx: any, state: RuntimeState, indexer: ToolCal
 	return { text: formatPruneCommandText(state, result), level: pruneResultLevel(result.details) };
 }
 
-function formatPruneCommandText(state: RuntimeState, result: { text: string; details?: Record<string, any> }): string {
+export function formatPruneCommandText(state: RuntimeState, result: { text: string; details?: Record<string, any> }): string {
 	const details = result.details;
 	if (!details || (details.summarized ?? 0) > 0) return result.text;
 	if (details.reason === "none_found") {
@@ -180,7 +184,7 @@ function formatPruneCommandText(state: RuntimeState, result: { text: string; det
 	].join("\n");
 }
 
-function pruneResultLevel(details: Record<string, any> | undefined): NotifyLevel {
+export function pruneResultLevel(details: Record<string, any> | undefined): NotifyLevel {
 	if (!details) return "warning";
 	if ((details.summarized ?? 0) > 0) return "info";
 	if (details.reason === "none_found") return "warning";
@@ -197,16 +201,11 @@ function holdNow(state: RuntimeState): CommandResult {
 	return { text: t(state.config, "cmd.hold.done", { turns: state.config.minTurnsBetweenCompacts }), level: "info" };
 }
 
-function buildConfig(pi: any, state: RuntimeState): string {
-	return [t(state.config, "cmd.config.title"), t(state.config, "cmd.config.file", { path: getConfigPath() }), JSON.stringify(state.config, null, 2)].join("\n");
-}
-
 function enableCapper(pi: any, store: HugeResultStore, state: RuntimeState): CommandResult {
 	const next = { ...state.config, hugeResultCapper: true };
 	const result = writeConfig(next);
 	if (!result.ok) return { text: t(state.config, "cmd.failed", { error: result.error }), level: "error" };
 	state.config = next;
-	ensureLookupTool(pi, store, state);
 	return { text: t(state.config, "cmd.capper.enabled", { path: getConfigPath() }), level: "warning" };
 }
 

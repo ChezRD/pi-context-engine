@@ -2,12 +2,14 @@ import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { DEFAULT_CONFIG, type ExtensionConfig } from "./config.ts";
 import { t } from "./i18n/index.ts";
+import { safeAppendEntry } from "./stale-context.ts";
 import { buildModelVisibleContext, extractModelVisibleMetadata, extractModelVisibleSection } from "./model-visible.ts";
 import { buildContextResultLookupHeader, CONTEXT_RESULT_LOOKUP_TOOL } from "./projection/harness-content.ts";
 
 export { CONTEXT_RESULT_LOOKUP_TOOL };
 export const CUSTOM_TYPE_HUGE_RESULT = "context-engine-huge-result";
 const MAX_SNIPPET_LINES = 4;
+const LOOKUP_PROMPT_SNIPPET = "Retrieve full tool output elided by pi-context-engine huge-result capper.";
 
 export interface StoredResult {
 	ref: string;
@@ -52,8 +54,7 @@ export class HugeResultStore {
 }
 
 export function persistHugeResult(pi: any, record: StoredResult): void {
-	if (typeof pi?.appendEntry !== "function") return;
-	pi.appendEntry(CUSTOM_TYPE_HUGE_RESULT, { version: 1, record });
+	safeAppendEntry(pi, CUSTOM_TYPE_HUGE_RESULT, { version: 1, record });
 }
 
 export function restoreHugeResultsFromSession(ctx: any, store: HugeResultStore): number {
@@ -107,46 +108,62 @@ export function buildPreview(record: StoredResult, config: ExtensionConfig): str
 		metadata: {
 			reason: "tool_output_exceeds_huge_result_limit",
 			original_bytes: record.bytes,
+			total_chars: record.text.length,
 			preview_head_chars: headBudget,
 			preview_tail_chars: tailBudget,
+			visible_preview_chars: visibleChars,
+			full_output_visible: fullResultFitsConfig,
+			preview_is_complete: fullResultFitsConfig,
+			required_recheck_for_complete_claim: !fullResultFitsConfig,
+			evidence_kind: fullResultFitsConfig ? "complete_tool_output" : "partial_tool_output_preview",
+			claim_strength: fullResultFitsConfig ? "strong" : "weak",
+			valid_claims: fullResultFitsConfig
+				? ["facts visible in this complete tool output", "the stored ref can revisit this same output"]
+				: ["facts visible in the shown excerpt", "metadata about why this output was capped"],
+			invalid_claims: fullResultFitsConfig
+				? ["facts about current filesystem state after this tool result without re-checking"]
+				: ["full read", "no matches", "no tests", "complete coverage", "all files checked", "exact counts across hidden ranges"],
 			source_tool: record.toolName ?? "unknown",
 			ref: record.ref,
 			ref_label: `[ref ${record.ref}]`,
-			recovery: {
-				tool: CONTEXT_RESULT_LOOKUP_TOOL,
-				arguments: { ref: record.ref, offset: 0, limit: initialLimit },
-			},
 		},
 		sections: [
-			{ name: "lookup", content: buildContextResultLookupHeader({ ref: record.ref, offset: 0, limit: initialLimit, returnedChars: Math.min(visibleChars, initialLimit), totalChars: record.text.length, bytes: record.bytes, hasMore: !fullResultFitsConfig, nextOffset: fullResultFitsConfig ? undefined : initialLimit }) },
+			{ name: "preview_metadata", content: buildPreviewMetadata({ ref: record.ref, returnedChars: Math.min(visibleChars, initialLimit), totalChars: record.text.length, bytes: record.bytes, hasMore: !fullResultFitsConfig }) },
 			{ name: "preview", content: [head, tail ? "\n…\n" : "", tail].join("\n") },
 		],
 	});
 }
 
 function buildModelInstruction(record: StoredResult, segment: { fullResultFitsConfig: boolean; headChars: number; tailChars: number; visibleChars: number; segmentChars: number }): string {
-	const subject = /^(read|cat|file|context_parallel_read|deepseek_cache_parallel_read)$/i.test(record.toolName ?? "") ? "file" : "tool output";
+	const subject = /^(read|cat|file|context_parallel_read)$/i.test(record.toolName ?? "") ? "file" : "tool output";
 	const totalSegments = Math.max(1, Math.ceil(record.text.length / segment.segmentChars));
 	if (segment.fullResultFitsConfig) {
 		return [
 			`This is the complete ${subject} (${record.bytes} bytes); no other segments exist.`,
-			`Stored ref ${record.ref} may be used later to revisit the same content.`,
-			`Do not call ${CONTEXT_RESULT_LOOKUP_TOOL} unless you need to quote or re-check this exact result.`,
+			`Do not claim facts about current filesystem state after this tool result without re-checking.`,
 		].join(" ");
 	}
 	const omittedChars = Math.max(0, record.text.length - segment.visibleChars);
 	const shape = segment.tailChars > 0
 		? `shown excerpt has ${segment.headChars} head chars and ${segment.tailChars} tail chars; about ${omittedChars} chars in the middle are not shown`
 		: `shown excerpt has ${segment.headChars} head chars; about ${omittedChars} chars after it are not shown`;
-	const nextOffset = Math.min(segment.segmentChars, record.text.length);
-	const nextLimit = Math.min(segment.segmentChars, Math.max(0, record.text.length - nextOffset));
 	const remainingSegments = Math.max(0, totalSegments - 1);
+	const continuation = record.toolName === "read"
+		? "For files, call read again with the original path and a smaller line range using offset/limit, following any continuation marker from the read output."
+		: "For command output, rerun the original command with a narrower scope, stronger filters, explicit counts, or output limits that directly prove the claim.";
 	return [
-		`This is segment 1/${totalSegments} of a ${record.bytes}-byte ${subject}; configured segment size is ${segment.segmentChars} chars.`,
+		`This is a bounded preview of a ${record.bytes}-byte ${subject}; configured cap is ${segment.segmentChars} chars.`,
 		`${shape}.`,
-		`Next segment: call ${CONTEXT_RESULT_LOOKUP_TOOL} with ref="${record.ref}", offset=${nextOffset}, limit=${nextLimit}; ${remainingSegments} segment(s) remain. Never request limit greater than ${segment.segmentChars} or greater than remaining chars.`,
-		"Do not claim facts about unseen ranges until you fetch them; you may also refer to this ref later.",
+		`${remainingSegments} hidden segment(s) are not present in this message.`,
+		continuation,
+		"This preview is not a full read and is not enough for audit, coverage, count, or exhaustive-search claims.",
+		"Do not say you fully read, checked all tests, checked every file, or completed coverage unless you run separate exhaustive listings/searches/counts that prove it.",
+		"Do not claim facts about hidden ranges until you re-check them with ordinary tools.",
 	].join(" ");
+}
+
+function buildPreviewMetadata(details: { ref: string; returnedChars: number; totalChars: number; bytes: number; hasMore: boolean }): string {
+	return `<!-- pi-context-engine: huge_result_preview ref=${details.ref} returned_chars=${details.returnedChars} total_chars=${details.totalChars} bytes=${details.bytes} has_more=${details.hasMore ? "true" : "false"} -->`;
 }
 
 export function isHugeResultPreview(result: any): boolean {
@@ -201,7 +218,7 @@ export function registerLookupTool(pi: any, store: HugeResultStore): void {
 		name: CONTEXT_RESULT_LOOKUP_TOOL,
 		label: t("tool.lookup.label"),
 		description: t("tool.lookup.description"),
-		promptSnippet: t("tool.lookup.promptSnippet"),
+		promptSnippet: LOOKUP_PROMPT_SNIPPET,
 		parameters: Type.Object({
 			ref: Type.String({ description: t("tool.lookup.param.ref") }),
 			offset: Type.Optional(Type.Number({ description: t("tool.lookup.param.offset") })),

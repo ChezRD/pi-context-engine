@@ -18,7 +18,8 @@ export function buildPinInjectionBlock(config: ExtensionConfig, state: RuntimeSt
 	}
 
 	if (config.skillPinning || config.priorityInjection) {
-		parts.push("# Context Engine Pins\n\nActive pinned blocks are authoritative and must survive summarization.\nWhen using a loaded skill, prefer `context_pin_skill` so the full skill body can be preserved across semantic folds.\nUse `context_pin` for compact high-priority rules, user decisions, and project invariants that must survive fold.");
+		parts.push("# Context Engine Pins\n\nPins survive context folds and add tokens to every subsequent model call.\n\nPrefer `context_pin_skill` for loaded skills — full skill text preserved across folds.\n\nUse `context_pin` **only** when all three apply:\n1. User explicitly asked to remember or persist something\n2. Forgetting the pin would produce a demonstrably incorrect answer or repeat an irreversible action\n3. The pinned information cannot be derived from code, docs, git, or filesystem\n\nOtherwise don\u0027t pin.");
+		parts.push("# System blocks — internal only\n\n`<context-engine-summary>` blocks are internal metadata. Never output them to the user. They are fold artifacts the engine inserts into history — you must not reproduce, echo, or reference their format in responses.");
 	}
 
 	// Priority/high-priority blocks

@@ -11,12 +11,12 @@ import { applyLocale, t } from "../src/i18n/index.ts";
 import { classifyPruner, detectPruner } from "../src/pruner-advisor.ts";
 import { getContextPercent, recommendContextAction } from "../src/context-monitor.ts";
 import { CUSTOM_TYPE_HUGE_RESULT, HugeResultStore, buildPreview, maybeCapToolResult, persistHugeResult, registerLookupTool, renderStoredHugeResult, restoreHugeResultsFromSession } from "../src/capper.ts";
-import { MODEL_VISIBLE_CONTEXT_MARKER, MODEL_VISIBLE_CONTEXT_SCHEMA } from "../src/model-visible.ts";
+import { MODEL_VISIBLE_CONTEXT_MARKER, MODEL_VISIBLE_CONTEXT_SCHEMA, extractModelVisibleMetadata } from "../src/model-visible.ts";
 import { estimateTokens, maybeAdjustCutForCache, simpleHash } from "../src/cache-engine/custom-compaction.ts";
 import { openCacheCheckpoint, currentCacheSegment, annotateUsageForCurrentSegment } from "../src/cache-engine/cache-checkpoints.ts";
-import { canCompactNow, decideCompaction, detectTextualToolCall, detectToolIntent, detectUserIntent, diffPrefix, extractCachePrefix, handleContext, handleMessageEnd, handleProviderPrefix, handleSessionBeforeCompact, handleToolCall, handleTurnEnd, loadToolIntentVocabulary, normalizeTools, registerParallelReadTool, shouldNotifyPrefixDrift, stableHash } from "../src/cache-engine/index.ts";
+import { canCompactNow, decideCompaction, detectTextualToolCall, detectToolIntent, detectUserIntent, detectUserIntentMultilingual, diffPrefix, extractCachePrefix, handleContext, handleMessageEnd, handleProviderPrefix, handleSessionBeforeCompact, handleToolCall, handleTurnEnd, loadToolIntentVocabulary, normalizeTools, registerParallelReadTool, shouldNotifyPrefixDrift, stableHash } from "../src/cache-engine/index.ts";
 import { decideAfterUsage, estimateTurnStart, readContextUsage, zoneForRatio } from "../src/cache-engine/decision-engine.ts";
-import { CUSTOM_TYPE_PRUNE_DEBUG, CUSTOM_TYPE_TELEMETRY, restoreTelemetryFromSession } from "../src/telemetry-persistence.ts";
+import { appendPruneDebugEntry, CUSTOM_TYPE_PRUNE_DEBUG, CUSTOM_TYPE_TELEMETRY, persistTelemetry, restoreTelemetryFromSession } from "../src/telemetry-persistence.ts";
 import { pruneMessages } from "../src/projection/pruner.ts";
 import { rebuildPrunedContextFromSession } from "../src/projection/rebuild.ts";
 import { executePrune, registerPruneTool, syncPruneToolActivation } from "../src/projection/prune-tool.ts";
@@ -185,7 +185,7 @@ test("config parser falls back and clamps invalid edge values", () => {
   });
   assert.equal(parsed.enabled, DEFAULT_CONFIG.enabled);
   assert.equal(parsed.pruneOn, DEFAULT_CONFIG.pruneOn);
-  assert.equal(parsed.pruneBatchSize, 20);
+  assert.equal(parsed.pruneBatchSize, 100);
   assert.equal(parsed.pruneBridgeLength, 1);
   assert.equal(parsed.hugeResultChars, DEFAULT_CONFIG.hugeResultChars);
   assert.equal(parsed.statusBarStyle, DEFAULT_CONFIG.statusBarStyle);
@@ -197,11 +197,14 @@ test("config parser falls back and clamps invalid edge values", () => {
   assert.equal(parsed.contextCompactPct, 0.7);
 
   const minValues = parseConfig({ pruneBatchSize: 0, pruneBridgeLength: 1, minTurnsBetweenCompacts: 0, foldTimeoutMs: 100, skillPinConfirmThreshold: 1 });
-  assert.equal(minValues.pruneBatchSize, 1);
+  assert.equal(minValues.pruneBatchSize, 20);
   assert.equal(minValues.pruneBridgeLength, 1);
   assert.equal(minValues.minTurnsBetweenCompacts, 0);
   assert.equal(minValues.foldTimeoutMs, 100);
   assert.equal(minValues.skillPinConfirmThreshold, 1);
+
+  assert.equal(parseConfig({ pruneBatchSize: 23 }).pruneBatchSize, 25);
+  assert.equal(parseConfig({ pruneBatchSize: 77 }).pruneBatchSize, 75);
 });
 
 test("config parser preserves all boolean fields", () => {
@@ -225,7 +228,7 @@ test("config parser preserves all boolean fields", () => {
 test("classifies pruner cache profiles", () => {
   assert.deepEqual(classifyPruner({ enabled: false }).cacheProfile, "risky");
   assert.deepEqual(classifyPruner({ enabled: true, pruneOn: "every-turn" }).cacheProfile, "bad");
-  assert.match(classifyPruner({ enabled: true, pruneOn: "every-turn" }).cacheProfileReason, /prompt-cache churn/);
+	assert.match(classifyPruner({ enabled: true, pruneOn: "every-turn" }).cacheProfileReason, /prompt-cache/i);
   assert.deepEqual(classifyPruner({ enabled: true, pruneOn: "agent-message", batchingMode: "agent-message" }).cacheProfile, "good");
   assert.deepEqual(classifyPruner({ enabled: true, pruneOn: "on-demand" }).cacheProfile, "good");
   assert.deepEqual(classifyPruner({ enabled: true, pruneOn: "agentic-auto" }).cacheProfile, "risky");
@@ -336,7 +339,53 @@ test("telemetry restore rebuilds prune indexer for provider-context pruning afte
     { role: "tool", toolCallId: "tc-2", content: "large 2" },
   ], restored.toolIndexer);
   assert.equal(pruned.length, 1);
-  assert.equal(pruned[0].role, "assistant");
+  assert.equal(pruned[0].role, "custom");
+});
+
+test("telemetry persistence omits live prune buffers and bulky diagnostics", () => {
+  const state = createRuntimeState();
+  state.engine.prune.pendingBatches.push({
+    turnIndex: 1,
+    toolCalls: [{ id: "pending-1", name: "read", turnIndex: 1, args: "x".repeat(2000), result: "y".repeat(2000) }],
+  });
+  state.engine.prune.pendingSummaries.push("stale summary");
+  state.engine.prune.sessionMap = {
+    version: 1,
+    builtAt: Date.now(),
+    nodes: [{ id: "n1", turnIndex: 1, kind: "tool-result", textPreview: "z".repeat(5000) }],
+    segments: [],
+    totals: { messages: 1, toolCalls: 1, toolResults: 1, lookups: 0, summarized: 0, dropCandidates: 0 },
+  };
+  state.engine.prune.impact.lastSummarizePrompt = "prompt".repeat(5000);
+  state.engine.prune.impact.lastSummarizeResponse = "response".repeat(5000);
+  state.engine.prune.impact.lastAcceptedSummaries = ["summary".repeat(1000)];
+
+  const entries = [];
+  persistTelemetry({ appendEntry: (customType, data) => entries.push({ customType, data }) }, state);
+
+  assert.equal(entries.length, 1);
+  const prune = entries[0].data.engine.prune;
+  assert.equal(prune.pendingBatches, undefined);
+  assert.equal(prune.pendingSummaries, undefined);
+  assert.equal(prune.sessionMap, undefined);
+  assert.equal(prune.impact.lastSummarizePrompt, undefined);
+  assert.equal(prune.impact.lastSummarizeResponse, undefined);
+  assert.equal(prune.impact.lastAcceptedSummaries, undefined);
+});
+
+test("prune debug persistence truncates captured prompt and response", () => {
+  const entries = [];
+  appendPruneDebugEntry({ appendEntry: (customType, data) => entries.push({ customType, data }) }, {
+    prompt: "p".repeat(25000),
+    response: "r".repeat(25000),
+    acceptedSummaries: ["s".repeat(4000)],
+  });
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].customType, CUSTOM_TYPE_PRUNE_DEBUG);
+  assert.ok(entries[0].data.prompt.length < 21000);
+  assert.ok(entries[0].data.response.length < 21000);
+  assert.ok(entries[0].data.acceptedSummaries[0].length < 3500);
 });
 
 test("context handler returns pruned messages so Pi standard context usage sees the rebuilt context", async () => {
@@ -353,7 +402,7 @@ test("context handler returns pruned messages so Pi standard context usage sees 
 
   assert.ok(result);
   assert.equal(result.messages.length, 1);
-  assert.equal(result.messages[0].role, "assistant");
+  assert.equal(result.messages[0].role, "custom");
 });
 
 test("context handler projects semantic fold synthetic message plus live tail from branch", async () => {
@@ -375,8 +424,10 @@ test("context handler projects semantic fold synthetic message plus live tail fr
     state,
   );
 
-  assert.deepEqual(result.messages, [
-    { role: "system", content: "sys" },
+  assert.equal(result.messages[0].role, "system");
+  assert.equal(result.messages[1].role, "system");
+  assert.match(result.messages[1].content, /<!-- pi-context-engine: fold guidance -->/);
+  assert.deepEqual(result.messages.slice(2), [
     { role: "assistant", content: "folded summary" },
     { role: "user", content: "tail user" },
     { role: "assistant", content: "tail assistant" },
@@ -400,8 +451,10 @@ test("context handler returns only system plus synthetic message when semantic f
     state,
   );
 
-  assert.deepEqual(result.messages, [
-    { role: "system", content: "sys" },
+  assert.equal(result.messages[0].role, "system");
+  assert.equal(result.messages[1].role, "system");
+  assert.match(result.messages[1].content, /<!-- pi-context-engine: fold guidance -->/);
+  assert.deepEqual(result.messages.slice(2), [
     { role: "assistant", content: "folded summary" },
   ]);
 });
@@ -415,8 +468,10 @@ test("context handler falls through safely when semantic fold branch lookup thro
     { sessionManager: { getBranch: async () => { throw new Error("boom"); } } },
     state,
   );
-  assert.deepEqual(result.messages, [
-    { role: "system", content: "sys" },
+  assert.equal(result.messages[0].role, "system");
+  assert.equal(result.messages[1].role, "system");
+  assert.match(result.messages[1].content, /<!-- pi-context-engine: fold guidance -->/);
+  assert.deepEqual(result.messages.slice(2), [
     { role: "assistant", content: "folded summary" },
   ]);
 });
@@ -741,6 +796,41 @@ test("agent-message prune collects on turn_end and flushes on final assistant me
   assert.equal(state.engine.prune.summarizedIds.includes("tc-agent-message"), true);
 });
 
+test("agent-message prune counts parallel batches captured from branch when turn_end toolResults are empty", async () => {
+  const state = createRuntimeState();
+  state.config.pruneEnabled = true;
+  state.config.pruneOn = "agent-message";
+  state.config.pruneBatchSize = 1;
+  state.config.pruneModel = "default";
+  const assistantWithTools = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "tc-parallel-a", name: "read", input: { path: "a.ts" } },
+      { type: "toolCall", id: "tc-parallel-b", name: "read", input: { path: "b.ts" } },
+    ],
+  };
+  const branch = [
+    { type: "message", turnIndex: 1, message: assistantWithTools },
+    { type: "message", turnIndex: 1, message: { role: "toolResult", toolCallId: "tc-parallel-a", content: "a data" } },
+    { type: "message", turnIndex: 1, message: { role: "assistant", content: "intermediate analysis" } },
+    { type: "message", turnIndex: 1, message: { role: "toolResult", toolCallId: "tc-parallel-b", content: "b data" } },
+  ];
+  const ctx = {
+    sessionManager: { getBranch: () => branch },
+    ui: { notify: () => {} },
+  };
+
+  await handleTurnEnd({ turnIndex: 1, message: { role: "assistant", content: "intermediate analysis" }, toolResults: [] }, {}, ctx, state);
+
+  assert.equal(state.engine.prune.pendingBatches.length, 1);
+  assert.deepEqual(state.engine.prune.pendingBatches[0].toolCalls.map((tc) => [tc.id, tc.result]), [
+    ["tc-parallel-a", "a data"],
+    ["tc-parallel-b", "b data"],
+  ]);
+  assert.equal(state.engine.prune.batchStepCounter, 1);
+  assert.equal(state.engine.prune.awaitingAgentMessage, true);
+});
+
 test("handleTurnEnd uses event turnIndex when provided and increments otherwise", async () => {
   const state = createRuntimeState();
   state.config.enabled = false;
@@ -881,9 +971,9 @@ test("handleSessionBeforeCompact stays inert when extension is disabled", () => 
   assert.equal(handleSessionBeforeCompact({}, {}, state), undefined);
 });
 
-test("handleSessionBeforeCompact stays inert when extension is enabled", () => {
+test("handleSessionBeforeCompact cancels empty host compaction when extension is enabled", () => {
   const state = createRuntimeState();
-  assert.equal(handleSessionBeforeCompact({}, {}, state), undefined);
+  assert.deepEqual(handleSessionBeforeCompact({ preparation: { messagesToSummarize: [], turnPrefixMessages: [] } }, {}, state), { cancel: true });
 });
 
 test("telemetry restore preserves prune impact trace fields after reload", () => {
@@ -1179,12 +1269,16 @@ test("canCompactNow enforces cooldown and max session compacts", () => {
 });
 
 test("parallel read wrapper registers only when extension and wrapper are enabled", () => {
-  const registered = [];
-  registerParallelReadTool({ registerTool: (tool) => registered.push(tool.name) }, { config: { enabled: false, parallelReadTool: true } });
-  registerParallelReadTool({ registerTool: (tool) => registered.push(tool.name) }, { config: { enabled: true, parallelReadTool: false } });
-  assert.deepEqual(registered, []);
-  registerParallelReadTool({ registerTool: (tool) => registered.push(tool.name) }, { config: { enabled: true, parallelReadTool: true } });
-  assert.deepEqual(registered, ["context_parallel_read"]);
+	assert.equal(DEFAULT_CONFIG.parallelReadTool, true);
+
+	const registered = [];
+	registerParallelReadTool({ registerTool: (tool) => registered.push(tool) }, { config: { enabled: false, parallelReadTool: true } });
+	registerParallelReadTool({ registerTool: (tool) => registered.push(tool) }, { config: { enabled: true, parallelReadTool: false } });
+	assert.deepEqual(registered, []);
+	registerParallelReadTool({ registerTool: (tool) => registered.push(tool) }, { config: { enabled: true, parallelReadTool: true } });
+	assert.deepEqual(registered.map((tool) => tool.name), ["context_parallel_read"]);
+	assert.match(registered[0].promptSnippet, /repeated read calls/);
+	assert.doesNotMatch(registered[0].promptSnippet, /Параллельное|并行|Paralleles/);
 });
 
 test("tool call repair is read-specific and duplicate suppression window is bounded", () => {
@@ -1240,6 +1334,7 @@ test("detectTextualToolCall flags explicit prose tool calls and avoids provider/
     assert.equal(detectTextualToolCall({ content: "function call: read({ path: 'a.ts' })" }), true);
     assert.equal(detectTextualToolCall({ content: "normal answer" }), false);
     assert.equal(detectTextualToolCall({ content: "This answer explains what a function call is." }), false);
+    assert.equal(detectTextualToolCall({ content: "Составляю аудит. В отчете есть метрики pass rate, line coverage и упоминания full reads. Это не запрос на вызов read." }), false);
     assert.equal(detectTextualToolCall({ content: "If the tool schema has offset and limit, I can call it like:\n```json\n{\"name\":\"context_result_lookup\",\"parameters\":{\"ref\":\"dsc-1\",\"offset\":0,\"limit\":100}}\n```" }), false);
     assert.equal(detectTextualToolCall({ content: "tool_call", toolCalls: [{ name: "read" }] }), false);
     assert.equal(detectTextualToolCall({ content: "tool_call", tool_calls: [{ function: { name: "read" } }] }), false);
@@ -1290,6 +1385,20 @@ test("detectUserIntent uses i18n vocabulary for user prompts", () => {
   assert.deepEqual(pickIntent(detectUserIntent({ prompt: "analyze this session" })), { kind: "analyze", reasonCode: "analysis_request", confidence: "medium" });
   assert.deepEqual(pickIntent(detectUserIntent({ prompt: "prune the context" })), { kind: "prune-request", reasonCode: "prune_request", confidence: "high" });
   assert.deepEqual(pickIntent(detectUserIntent({ prompt: "запусти инструмент search_code" }, { locale: "ru", registeredTools: ["search_code"] })), { kind: "tool-request", reasonCode: "explicit_tool_request", confidence: "high", toolName: "search_code" });
+  assert.deepEqual(pickIntent(detectUserIntent({ prompt: "пожалуйста првоеди глубокий аудит покрытия тестами pi-context-engine" }, { locale: "ru" })), { kind: "analyze", reasonCode: "analysis_request", confidence: "medium" });
+  assert.deepEqual(pickIntent(detectUserIntent({ prompt: "прочитай свежую tmp сессию" }, { locale: "ru" })), { kind: "search", reasonCode: "search_request", confidence: "medium" });
+  assert.deepEqual(pickIntent(detectUserIntent({ prompt: "свертка контекста не сработала" }, { locale: "ru" })), { kind: "prune-request", reasonCode: "prune_request", confidence: "high" });
+  assert.deepEqual(pickIntent(detectUserIntent({ prompt: "перевір покриття тестами" }, { locale: "uk" })), { kind: "analyze", reasonCode: "analysis_request", confidence: "medium" });
+  assert.deepEqual(pickIntent(detectUserIntent({ prompt: "busca las pruebas relacionadas" }, { locale: "es" })), { kind: "search", reasonCode: "search_request", confidence: "medium" });
+  assert.deepEqual(pickIntent(detectUserIntent({ prompt: "analysiere die Tests" }, { locale: "de" })), { kind: "analyze", reasonCode: "analysis_request", confidence: "medium" });
+  assert.deepEqual(pickIntent(detectUserIntent({ prompt: "分析测试覆盖" }, { locale: "zh-CN" })), { kind: "analyze", reasonCode: "analysis_request", confidence: "medium" });
+  assert.deepEqual(pickIntent(detectUserIntent({ prompt: "the word search appears in this string" }, { locale: "en" })), { kind: "general", reasonCode: "no_specific_intent", confidence: "high" });
+  assert.deepEqual(pickIntent(detectUserIntent({ prompt: "слово найди встречается в тесте" }, { locale: "ru" })), { kind: "general", reasonCode: "no_specific_intent", confidence: "high" });
+});
+
+test("detectUserIntentMultilingual detects non-active user language before falling back to general", () => {
+  assert.deepEqual(pickIntent(detectUserIntentMultilingual({ prompt: "проанализируй package.json и кратко скажи какие npm scripts есть" }, { locale: "en" })), { kind: "analyze", reasonCode: "analysis_request", confidence: "medium" });
+  assert.deepEqual(pickIntent(detectUserIntentMultilingual({ prompt: "слово найди встречается в тесте" }, { locale: "en" })), { kind: "general", reasonCode: "no_specific_intent", confidence: "high" });
 });
 
 function pickIntent(result) {
@@ -1313,19 +1422,32 @@ test("huge result capper elides only above threshold and preserves recovery deta
   assert.equal(result.content[0].type, "text");
   assert.match(result.content[0].text, new RegExp(MODEL_VISIBLE_CONTEXT_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(result.content[0].text, new RegExp(`<model_visible_context schema="${MODEL_VISIBLE_CONTEXT_SCHEMA}" kind="context_result_truncated" ui="custom-rendered">`));
-  assert.match(result.content[0].text, /<instructions>\nThis is segment 1\/2 of a 15-byte tool output; configured segment size is 10 chars\./);
+  assert.match(result.content[0].text, /<instructions>\nThis is a bounded preview of a 15-byte tool output; configured cap is 10 chars\./);
   assert.ok(result.content[0].text.indexOf("<instructions>") < result.content[0].text.indexOf("<metadata>"));
-  assert.match(result.content[0].text, /Next segment: call context_result_lookup with ref="dsc-bash-1", offset=10, limit=5; 1 segment\(s\) remain\. Never request limit greater than 10 or greater than remaining chars\./);
+  assert.match(result.content[0].text, /1 hidden segment\(s\) are not present in this message\./);
+  assert.match(result.content[0].text, /rerun the original command with a narrower scope/);
+  assert.match(result.content[0].text, /This preview is not a full read and is not enough for audit, coverage, count, or exhaustive-search claims\./);
+  assert.match(result.content[0].text, /Do not say you fully read, checked all tests, checked every file, or completed coverage unless you run separate exhaustive listings\/searches\/counts that prove it/);
+  assert.match(result.content[0].text, /Do not claim facts about hidden ranges until you re-check them with ordinary tools/);
   assert.match(result.content[0].text, /<metadata>/);
-  assert.match(result.content[0].text, /"recovery":/);
-  assert.match(result.content[0].text, /"tool": "context_result_lookup"/);
-  assert.match(result.content[0].text, /"limit": 10/);
-  assert.match(result.content[0].text, /This is segment 1\//);
-  assert.match(result.content[0].text, /configured segment size is \d+ chars/);
-  assert.match(result.content[0].text, /Next segment: call context_result_lookup with ref="dsc-bash-1", offset=\d+, limit=\d+; \d+ segment\(s\) remain/);
-  assert.match(result.content[0].text, /"arguments":/);
+  assert.doesNotMatch(result.content[0].text, /"recovery":/);
+  assert.doesNotMatch(result.content[0].text, /"tool": "context_result_lookup"/);
+  const metadata = extractModelVisibleMetadata(result.content[0].text);
+  assert.equal(metadata.full_output_visible, false);
+  assert.equal(metadata.preview_is_complete, false);
+  assert.equal(metadata.required_recheck_for_complete_claim, true);
+  assert.equal(metadata.evidence_kind, "partial_tool_output_preview");
+  assert.equal(metadata.claim_strength, "weak");
+  assert.ok(metadata.valid_claims.includes("facts visible in the shown excerpt"));
+  assert.ok(metadata.invalid_claims.includes("no tests"));
+  assert.equal(metadata.total_chars, fullResult.length);
+  assert.match(result.content[0].text, /This is a bounded preview/);
+  assert.match(result.content[0].text, /configured cap is \d+ chars/);
+  assert.match(result.content[0].text, /\d+ hidden segment\(s\) are not present in this message/);
+  assert.doesNotMatch(result.content[0].text, /"arguments":/);
   assert.match(result.content[0].text, /dsc-bash-1/);
-  assert.match(result.content[0].text, /\[context_result_lookup kind=slice ref=dsc-bash-1 offset=0 limit=10 range=0:\d+ returned_chars=\d+ total_chars=15 bytes=15 has_more=true next_offset=10\]/);
+  assert.match(result.content[0].text, /<payload name="preview_metadata">/);
+  assert.match(result.content[0].text, /<!-- pi-context-engine: huge_result_preview ref=dsc-bash-1 returned_chars=\d+ total_chars=15 bytes=15 has_more=true -->/);
   assert.deepEqual(result.details, { elidedBy: "pi-context-engine", ref: "dsc-bash-1", bytes: 15 });
   const record = store.get("dsc-bash-1");
   assert.equal(record.toolCallId, "1");
@@ -1368,9 +1490,9 @@ test("huge result capper uses configured char threshold instead of preview or by
 
   const capped = maybeCapToolResult({ content: [{ type: "text", text: "abcde" }], toolCallId: "3", toolName: "bash" }, config, store);
   assert.ok(capped);
-  assert.match(capped.content[0].text, /configured segment size is 4 chars/);
-  assert.match(capped.content[0].text, /Next segment: call context_result_lookup with ref="dsc-bash-1", offset=4, limit=1/);
-  assert.match(capped.content[0].text, /"limit": 4/);
+  assert.match(capped.content[0].text, /configured cap is 4 chars/);
+  assert.match(capped.content[0].text, /1 hidden segment\(s\) are not present in this message/);
+  assert.doesNotMatch(capped.content[0].text, /context_result_lookup/);
 });
 
 test("huge result model instruction avoids cutout wording when preview contains the full result", () => {
@@ -1380,7 +1502,13 @@ test("huge result model instruction avoids cutout wording when preview contains 
   const text = buildPreview(record, { ...DEFAULT_CONFIG, hugeResultChars: 20, hugeResultHeadChars: 20, hugeResultTailChars: 0 });
 
   assert.match(text, /<instructions>\nThis is the complete tool output \(16 bytes\); no other segments exist\./);
-  assert.match(text, /Stored ref dsc-bash-1 may be used later to revisit the same content/);
+  assert.match(text, /Do not claim facts about current filesystem state after this tool result without re-checking/);
+  const metadata = extractModelVisibleMetadata(text);
+  assert.equal(metadata.full_output_visible, true);
+  assert.equal(metadata.preview_is_complete, true);
+  assert.equal(metadata.required_recheck_for_complete_claim, false);
+  assert.equal(metadata.evidence_kind, "complete_tool_output");
+  assert.equal(metadata.claim_strength, "strong");
   assert.doesNotMatch(text, /segment 1\//);
   assert.doesNotMatch(text, /remaining slices/);
   assert.doesNotMatch(text, /not the full file\/output/);
@@ -1397,25 +1525,25 @@ test("huge result capper bounds inline preview by configured segment size", () =
   assert.ok(result);
   const preview = result.content[0].text.match(/<payload name="preview">\n([\s\S]*?)\n<\/payload>/)?.[1] ?? "";
   assert.ok(preview.length <= 10_100);
-  assert.match(result.content[0].text, /configured segment size is 10000 chars/);
-  assert.match(result.content[0].text, /"tool": "context_result_lookup"/);
+  assert.match(result.content[0].text, /configured cap is 10000 chars/);
+  assert.doesNotMatch(result.content[0].text, /"tool": "context_result_lookup"/);
 });
 
-test("huge result refs persist and restore across session reload", () => {
+test("huge result refs persist during tool-result handling and restore from session", () => {
   const entries = [];
   const store = new HugeResultStore((record) => persistHugeResult({ appendEntry: (customType, data) => entries.push({ type: "custom", customType, data }) }, record));
   const result = maybeCapToolResult(
     { content: [{ type: "text", text: "persisted".repeat(10_000) }], toolCallId: "1", toolName: "read" },
     { ...DEFAULT_CONFIG, hugeResultChars: 100 },
     store,
-  );
-  assert.equal(result.details.ref, "dsc-read-1");
-  assert.equal(entries[0].customType, CUSTOM_TYPE_HUGE_RESULT);
+	);
+	assert.equal(result.details.ref, "dsc-read-1");
+	assert.equal(entries.length, 1);
 
-  const restored = new HugeResultStore();
-  const restoredCount = restoreHugeResultsFromSession({ sessionManager: { getEntries: () => entries } }, restored);
-  assert.equal(restoredCount, 1);
-  assert.equal(restored.get("dsc-read-1").text, "persisted".repeat(10_000));
+	const restored = new HugeResultStore();
+	const restoredCount = restoreHugeResultsFromSession({ sessionManager: { getEntries: () => entries } }, restored);
+	assert.equal(restoredCount, 1);
+	assert.equal(restored.get("dsc-read-1").text, "persisted".repeat(10_000));
 });
 
 test("huge result store uses fallback slug, truncates long tool slugs, and ignores invalid restored records", () => {
@@ -1536,6 +1664,20 @@ test("token counting: whitespace-only and multimodal content ignore non-text par
 			{ type: "input_audio", data: "ignored" },
 		],
 	}), Math.ceil((5 + 4) / 4));
+});
+
+test("token counting: very long content over 100k chars", async () => {
+	const { countMessageTokens } = await import("../src/projection/history-folder.ts");
+	const long = "x".repeat(100_000);
+	const tokens = countMessageTokens({ role: "user", content: long });
+	assert.equal(tokens, Math.ceil((100_000 + 4) / 4));
+});
+
+test("token counting: null content returns 0", async () => {
+	const { countMessageTokens } = await import("../src/projection/history-folder.ts");
+	assert.equal(countMessageTokens(null), 0);
+	assert.equal(countMessageTokens(undefined), 0);
+	assert.equal(countMessageTokens({ role: "user", content: null }), 1); // only role chars
 });
 
 // ── Cache Checkpoint Tests ──
@@ -1664,4 +1806,50 @@ test("currentSegmentStats returns filtered stats", () => {
 	const stats = currentSegmentStats(state);
 	assert.ok(stats !== undefined);
 	assert.equal(stats.requests, 0);
+});
+
+import { maybeInjectCachePrompt } from "../src/cache-engine/cache-prompt-inject.ts";
+
+test("maybeInjectCachePrompt returns undefined when disabled", () => {
+	const state = createRuntimeState();
+	state.config.enabled = true;
+	state.config.cachePromptInjection = false;
+	const result = maybeInjectCachePrompt({}, {}, state);
+	assert.equal(result, undefined);
+});
+
+test("maybeInjectCachePrompt returns undefined when engine disabled", () => {
+	const state = createRuntimeState();
+	state.config.enabled = false;
+	state.config.cachePromptInjection = true;
+	const result = maybeInjectCachePrompt({}, {}, state);
+	assert.equal(result, undefined);
+});
+
+test("maybeInjectCachePrompt returns undefined when marker already present", () => {
+	const state = createRuntimeState();
+	state.config.enabled = true;
+	state.config.cachePromptInjection = true;
+	const result = maybeInjectCachePrompt({}, { getSystemPrompt: () => "[Context Engine]" }, state);
+	assert.equal(result, undefined);
+});
+
+test("maybeInjectCachePrompt injects prompt when conditions met", () => {
+	const state = createRuntimeState();
+	state.config.enabled = true;
+	state.config.cachePromptInjection = true;
+	const result = maybeInjectCachePrompt({}, { getSystemPrompt: () => "system prompt" }, state);
+	assert.ok(result);
+	assert.ok(result.systemPrompt.includes("[Context Engine]"));
+	assert.ok(result.systemPrompt.includes("system prompt"));
+});
+
+test("restoreTelemetryFromSession initializes missing prune impact", () => {
+	const state = createRuntimeState();
+	state.engine.prune.impact = undefined;
+	const entries = [{ type: "custom", customType: CUSTOM_TYPE_TELEMETRY, data: { version: 1, stats: state.stats, engine: { prune: { summarizedRecords: [], summarizedIds: [] } } } }];
+	const result = restoreTelemetryFromSession({ sessionManager: { getEntries: () => entries } }, state);
+	assert.equal(result, true);
+	assert.ok(state.engine.prune.impact);
+	assert.equal(state.engine.prune.impact.summarizeCacheReadTokens, 0);
 });

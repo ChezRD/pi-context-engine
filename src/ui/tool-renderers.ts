@@ -10,6 +10,8 @@ import { Text } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import { extractToolResultText, type HugeResultStore, renderStoredHugeResult } from "../capper.ts";
 import { t } from "../i18n/index.ts";
+import { extractModelVisibleMetadata, extractModelVisibleSection } from "../model-visible.ts";
+import { TOOL_EVIDENCE_KIND } from "../tool-evidence.ts";
 
 type BuiltInTools = ReturnType<typeof createBuiltInTools>;
 type BuiltInToolName = keyof BuiltInTools;
@@ -41,13 +43,21 @@ function shortenPath(path: string): string {
 }
 
 function firstTextLine(result: any): string {
-	const text = extractToolResultText(result?.content)?.trim();
+	const text = renderableResultText(result)?.trim();
 	if (!text) return "";
-	return text.split(/\r?\n/)[0] ?? "";
+	return text.split(/\r?\n/)[0];
+}
+
+function renderableResultText(result: any): string | undefined {
+	const text = extractToolResultText(result?.content);
+	if (!text) return undefined;
+	const metadata = extractModelVisibleMetadata(text);
+	if (metadata?.kind === TOOL_EVIDENCE_KIND) return extractModelVisibleSection(text, "output");
+	return text;
 }
 
 function renderPlainResult(result: any, expanded: boolean, theme: any): Text {
-	const text = extractToolResultText(result?.content);
+	const text = renderableResultText(result);
 	if (!text) return new Text("", 0, 0);
 	const lines = text.split(/\r?\n/);
 	if (!expanded) {

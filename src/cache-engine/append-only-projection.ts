@@ -25,7 +25,7 @@ export function activateAppendOnlyProjectionFromCompact(result: any, state: Runt
 	if (!summary || !firstKeptEntryId) return;
 	state.engine.appendOnly.enabled = true;
 	state.engine.appendOnly.projectionActive = true;
-	state.engine.appendOnly.stableSummary = { role: "assistant", content: summary, name: "context_cache_stable_summary" };
+	state.engine.appendOnly.stableSummary = { role: "custom", customType: "context-engine-summary", content: [{ type: "text", text: summary }], name: "context_cache_stable_summary" };
 	state.engine.appendOnly.tailStartEntryId = firstKeptEntryId;
 	state.engine.appendOnly.tailFingerprint = undefined;
 	state.engine.appendOnly.invalidatedReasonKey = undefined;

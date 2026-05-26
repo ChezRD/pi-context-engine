@@ -13,21 +13,40 @@ function byteLength(value: unknown): number {
 	}
 }
 
-export function inspectProviderPayload(body: unknown): PayloadDiagnostics {
+function hasToolCalls(message: unknown): boolean {
+	if (!isObject(message)) return false;
+	if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return true;
+	const content = Array.isArray(message.content) ? message.content : [];
+	return content.some((part) => isObject(part) && (part.type === "toolCall" || part.type === "tool_use"));
+}
+
+function roleOf(message: unknown): string {
+	return isObject(message) && typeof message.role === "string" ? message.role : "unknown";
+}
+
+export function inspectProviderPayload(body: unknown, meta?: { requestIndex?: number }): PayloadDiagnostics {
 	const payload = isObject(body) ? body : {};
 	const messages = Array.isArray(payload.messages) ? payload.messages : [];
 	const tools = Array.isArray(payload.tools) ? payload.tools : [];
 	let assistantMessages = 0;
 	let assistantMissingReasoningContent = 0;
+	let assistantToolCallMessages = 0;
+	let toolResultMessages = 0;
 	for (const message of messages) {
-		if (!isObject(message) || message.role !== "assistant") continue;
-		assistantMessages++;
-		if (!("reasoning_content" in message)) assistantMissingReasoningContent++;
+		if (!isObject(message)) continue;
+		if (message.role === "assistant") {
+			assistantMessages++;
+			if (hasToolCalls(message)) assistantToolCallMessages++;
+			if (!("reasoning_content" in message)) assistantMissingReasoningContent++;
+		}
+		if (message.role === "tool") toolResultMessages++;
 	}
+	const lastMessage = messages[messages.length - 1];
 	const thinking = isObject(payload.thinking) ? payload.thinking : undefined;
 	const streamOptions = isObject(payload.stream_options) ? payload.stream_options : undefined;
 	return {
 		createdAt: Date.now(),
+		requestIndex: meta?.requestIndex,
 		messageCount: messages.length,
 		toolCount: tools.length,
 		payloadBytes: byteLength(body),
@@ -37,6 +56,12 @@ export function inspectProviderPayload(body: unknown): PayloadDiagnostics {
 		promptCacheKey: typeof payload.prompt_cache_key === "string" && payload.prompt_cache_key.length > 0,
 		assistantMessages,
 		assistantMissingReasoningContent,
+		assistantToolCallMessages,
+		toolResultMessages,
+		lastMessageRole: roleOf(lastMessage),
+		lastMessageHasToolCalls: hasToolCalls(lastMessage),
+		lastMessageToolCallId: isObject(lastMessage) && typeof lastMessage.tool_call_id === "string" ? lastMessage.tool_call_id : undefined,
+		tailRoles: messages.slice(-8).map(roleOf),
 	};
 }
 
@@ -56,5 +81,6 @@ export function formatPayloadDiagnostics(diag: PayloadDiagnostics | undefined, c
 		`  ${t(config, "payload.promptCacheKey", { value: diag.promptCacheKey ? t(config, "payload.present") : t(config, "payload.notPresent") })}`,
 		`  ${t(config, "payload.assistantMessages", { count: diag.assistantMessages })}`,
 		`  ${t(config, "payload.reasoningCheck", { status: reasoningStatus })}`,
+		`  request #${diag.requestIndex ?? "?"} · tail=${diag.tailRoles?.join(" > ") ?? "unknown"} · last=${diag.lastMessageRole ?? "unknown"}${diag.lastMessageToolCallId ? `:${diag.lastMessageToolCallId}` : ""}`,
 	].join("\n");
 }

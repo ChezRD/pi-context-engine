@@ -1,4 +1,4 @@
-import { localeFallbackChain, tArrayMerged } from "../i18n/index.ts";
+import { I18N_LOCALES, localeFallbackChain, tArrayMerged } from "../i18n/index.ts";
 
 export type ToolIntentKind =
 	| "structured-call-present"
@@ -9,7 +9,7 @@ export type ToolIntentKind =
 
 export type ToolIntentConfidence = "high" | "medium" | "low";
 
-export type UserIntentKind = "tool-request" | "search" | "analyze" | "prune-request" | "general";
+export type UserIntentKind = "tool-request" | "search" | "analyze" | "prune-request" | "save-memory" | "diagnose" | "general";
 
 export type ToolIntentReasonCode =
 	| "structured_tool_calls"
@@ -43,7 +43,7 @@ export interface UserIntentDetection {
 	vocabularyLocale?: string;
 	toolName?: string;
 	matchedAction?: string;
-	reasonCode: "explicit_tool_request" | "search_request" | "analysis_request" | "prune_request" | "no_specific_intent";
+	reasonCode: "explicit_tool_request" | "search_request" | "analysis_request" | "prune_request" | "save_memory_request" | "diagnose_request" | "no_specific_intent";
 	evidence?: {
 		proseSnippet?: string;
 		registeredToolMatched?: boolean;
@@ -57,9 +57,13 @@ export interface ToolIntentVocabulary {
 	toolNouns: string[];
 	explanationMarkers: string[];
 	futureMarkers: string[];
+	metaLabelWords: string[];
 	userSearchWords: string[];
 	userAnalyzeWords: string[];
 	userPruneWords: string[];
+	userRememberWords: string[];
+	userDiagnoseWords: string[];
+	userConfirmationWords: string[];
 }
 
 export interface DetectToolIntentOptions {
@@ -76,6 +80,24 @@ export interface PendingToolIntent {
 	nudged?: boolean;
 }
 
+export type GuidanceKind = "user-intent" | "tool-intent";
+
+export interface GuidanceRecord {
+	version: 1;
+	kind: GuidanceKind;
+	stableKey: string;
+	content: string;
+	createdTurn: number;
+	updatedTurn: number;
+	confidence: ToolIntentConfidence;
+	intentKind: UserIntentKind | ToolIntentKind;
+	reasonCode: string;
+	matchedSignal?: string;
+	toolName?: string;
+	active: boolean;
+	sourceEvent: "user_input" | "assistant_message";
+}
+
 export interface RecentToolIntent {
 	id: string;
 	turnIndex: number;
@@ -88,7 +110,7 @@ export interface IntentNudgeGateState {
 	active?: {
 		sessionId: string;
 		dedupeKey: string;
-		source: "tool-intent-nudge";
+		source: "tool-intent-nudge" | "user-intent-nudge";
 		expiresAt: number;
 	};
 	recentDedupeKeys: string[];
@@ -98,12 +120,22 @@ export interface ToolIntentState {
 	pending: PendingToolIntent[];
 	recent: RecentToolIntent[];
 	lastUserIntent?: UserIntentDetection;
+	pendingUserIntentConfirmation?: UserIntentDetection;
+	lastUserIntentNudgeKey?: string;
+	persistedUserIntentNudgeKey?: string;
+	persistedToolIntentNudgeKeys: string[];
+	persistedGuidanceKeys: string[];
+	guidanceRecords: GuidanceRecord[];
+	deliveredGuidanceKey?: string;
+	contextGuidanceKey?: string;
+	lastUserInputHash?: string;
 	stats: {
 		detected: number;
 		matched: number;
 		unmatched: number;
 		suppressed: number;
 		nudges: number;
+		userNudges: number;
 		nudgeSuppressedDuplicate: number;
 		nudgeChars: number;
 	};
@@ -147,9 +179,13 @@ export function loadToolIntentVocabulary(locale: string | undefined, override: P
 		toolNouns: unique(override.toolNouns ?? tArrayMerged("intent.toolNouns", normalized)),
 		explanationMarkers: unique(override.explanationMarkers ?? tArrayMerged("intent.explanationMarkers", normalized)),
 		futureMarkers: unique(override.futureMarkers ?? tArrayMerged("intent.futureMarkers", normalized)),
+		metaLabelWords: unique(override.metaLabelWords ?? tArrayMerged("intent.metaLabelWords", normalized)),
 		userSearchWords: unique(override.userSearchWords ?? tArrayMerged("intent.user.searchWords", normalized)),
 		userAnalyzeWords: unique(override.userAnalyzeWords ?? tArrayMerged("intent.user.analyzeWords", normalized)),
 		userPruneWords: unique(override.userPruneWords ?? tArrayMerged("intent.user.pruneWords", normalized)),
+		userRememberWords: unique(override.userRememberWords ?? tArrayMerged("intent.user.rememberWords", normalized)),
+		userDiagnoseWords: unique(override.userDiagnoseWords ?? tArrayMerged("intent.user.diagnoseWords", normalized)),
+		userConfirmationWords: unique(override.userConfirmationWords ?? tArrayMerged("intent.user.confirmationWords", normalized)),
 	};
 }
 
@@ -200,6 +236,20 @@ function detectToolName(text: string, tools: string[]): string | undefined {
 		if (new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?:\\s*\\(|(?=$|[^\\p{L}\\p{N}_]))`, "iu").test(text)) return tool;
 	}
 	return undefined;
+}
+
+function toolNameIndex(text: string, tool: string | undefined): number | undefined {
+	if (!tool) return undefined;
+	const escaped = escapeRegExp(tool);
+	const match = new RegExp(`(?:^|[^\\p{L}\\p{N}_])(${escaped})(?:\\s*\\(|(?=$|[^\\p{L}\\p{N}_]))`, "iu").exec(text);
+	if (!match || match.index < 0) return undefined;
+	return match.index + Math.max(0, match[0].indexOf(match[1]));
+}
+
+function nearbyIntent(actionMatch: RegExpExecArray | undefined | null, objectIndex: number | undefined, maxDistance = 120): boolean {
+	if (!actionMatch || objectIndex === undefined) return false;
+	const actionIndex = actionMatch.index + Math.max(0, actionMatch[0].indexOf(actionMatch[1]));
+	return Math.abs(actionIndex - objectIndex) <= maxDistance;
 }
 
 function detectCallExpression(text: string, tools: string[]): string | undefined {
@@ -287,6 +337,8 @@ export function detectToolIntent(message: any, options: DetectToolIntentOptions 
 	const actionMatch = actionPattern?.exec(clean);
 	const nounMatch = nounPattern?.exec(clean);
 	const explicitTool = detectToolName(clean, tools) ?? detectNamedToolObject(clean, vocab);
+	const explicitToolIndex = toolNameIndex(clean, explicitTool);
+	const nounIndex = nounMatch ? nounMatch.index + Math.max(0, nounMatch[0].indexOf(nounMatch[1])) : undefined;
 
 	if (hasExplanationOnly(clean, vocab)) {
 		return {
@@ -300,7 +352,7 @@ export function detectToolIntent(message: any, options: DetectToolIntentOptions 
 		};
 	}
 
-	if (actionMatch && explicitTool) {
+	if (actionMatch && explicitTool && nearbyIntent(actionMatch, explicitToolIndex)) {
 		return {
 			kind: "imminent-tool-call",
 			confidence: "high",
@@ -315,7 +367,7 @@ export function detectToolIntent(message: any, options: DetectToolIntentOptions 
 		};
 	}
 
-	if (actionMatch && nounMatch && futurePattern?.test(clean)) {
+	if (actionMatch && nounMatch && nearbyIntent(actionMatch, nounIndex, 80) && futurePattern?.test(clean)) {
 		return {
 			kind: "imminent-tool-call",
 			confidence: "medium",
@@ -361,6 +413,8 @@ export function detectToolIntent(message: any, options: DetectToolIntentOptions 
 export function extractUserIntentText(input: any): string {
 	if (typeof input === "string") return input;
 	if (!input || typeof input !== "object") return "";
+	const directMessageText = extractMessageText(input);
+	if (directMessageText.trim()) return directMessageText;
 	const candidates = [
 		input.prompt,
 		input.text,
@@ -382,9 +436,21 @@ export function extractUserIntentText(input: any): string {
 	return "";
 }
 
-function containsAny(text: string, words: string[]): string | undefined {
+function containsAny(text: string, words: string[], metaLabelWords: string[]): string | undefined {
+	const metaLabelPattern = wordPattern(metaLabelWords);
 	for (const word of words) {
-		if (new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escapeRegExp(word)}(?=$|[^\\p{L}\\p{N}_])`, "iu").test(text)) return word;
+		if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(word) && text.includes(word)) return word;
+		const escaped = escapeRegExp(word);
+		const suffix = word.includes(" ") || word.length < 4 ? "" : "[\\p{L}\\p{N}_-]*";
+		const match = new RegExp(`(?:^|[^\\p{L}\\p{N}_])(${escaped}${suffix})(?=$|[^\\p{L}\\p{N}_])`, "iu").exec(text);
+		if (!match) continue;
+		const wordStart = match.index + Math.max(0, match[0].indexOf(match[1]));
+		const prefix = text.slice(Math.max(0, wordStart - 32), wordStart).toLowerCase();
+		if (metaLabelPattern) {
+			const labelMatch = metaLabelPattern.exec(prefix);
+			if (labelMatch && prefix.slice(labelMatch.index + labelMatch[0].length).trim() === "") continue;
+		}
+		return word;
 	}
 	return undefined;
 }
@@ -413,19 +479,39 @@ export function detectUserIntent(input: any, options: DetectToolIntentOptions = 
 			evidence: { proseSnippet: snippet(text), registeredToolMatched: true },
 		};
 	}
-	const pruneWord = containsAny(text, vocab.userPruneWords);
+	const pruneWord = containsAny(text, vocab.userPruneWords, vocab.metaLabelWords);
 	if (pruneWord) {
 		return { kind: "prune-request", confidence: "high", locale, vocabularyLocale: vocab.locale, matchedAction: pruneWord, reasonCode: "prune_request", evidence: { proseSnippet: snippet(text) } };
 	}
-	const searchWord = containsAny(text, vocab.userSearchWords);
+	const searchWord = containsAny(text, vocab.userSearchWords, vocab.metaLabelWords);
 	if (searchWord) {
 		return { kind: "search", confidence: "medium", locale, vocabularyLocale: vocab.locale, matchedAction: searchWord, reasonCode: "search_request", evidence: { proseSnippet: snippet(text) } };
 	}
-	const analyzeWord = containsAny(text, vocab.userAnalyzeWords);
+	const analyzeWord = containsAny(text, vocab.userAnalyzeWords, vocab.metaLabelWords);
 	if (analyzeWord) {
 		return { kind: "analyze", confidence: "medium", locale, vocabularyLocale: vocab.locale, matchedAction: analyzeWord, reasonCode: "analysis_request", evidence: { proseSnippet: snippet(text) } };
 	}
+	const rememberWord = containsAny(text, vocab.userRememberWords, vocab.metaLabelWords);
+	if (rememberWord) {
+		return { kind: "save-memory", confidence: "medium", locale, vocabularyLocale: vocab.locale, matchedAction: rememberWord, reasonCode: "save_memory_request", evidence: { proseSnippet: snippet(text) } };
+	}
+	const diagnoseWord = containsAny(text, vocab.userDiagnoseWords, vocab.metaLabelWords);
+	if (diagnoseWord) {
+		return { kind: "diagnose", confidence: "medium", locale, vocabularyLocale: vocab.locale, matchedAction: diagnoseWord, reasonCode: "diagnose_request", evidence: { proseSnippet: snippet(text) } };
+	}
 	return { kind: "general", confidence: "high", locale, vocabularyLocale: vocab.locale, reasonCode: "no_specific_intent", evidence: { proseSnippet: snippet(text) } };
+}
+
+export function detectUserIntentMultilingual(input: any, options: DetectToolIntentOptions = {}): UserIntentDetection {
+	const primary = detectUserIntent(input, options);
+	if (primary.kind !== "general") return primary;
+	const tried = new Set(localeFallbackChain(options.locale));
+	for (const locale of I18N_LOCALES) {
+		if (tried.has(locale)) continue;
+		const detection = detectUserIntent(input, { ...options, locale });
+		if (detection.kind !== "general") return detection;
+	}
+	return primary;
 }
 
 export function createToolIntentState(): ToolIntentState {
@@ -433,12 +519,21 @@ export function createToolIntentState(): ToolIntentState {
 		pending: [],
 		recent: [],
 		lastUserIntent: undefined,
+		lastUserIntentNudgeKey: undefined,
+		persistedUserIntentNudgeKey: undefined,
+		persistedToolIntentNudgeKeys: [],
+		persistedGuidanceKeys: [],
+		guidanceRecords: [],
+		deliveredGuidanceKey: undefined,
+		contextGuidanceKey: undefined,
+		lastUserInputHash: undefined,
 		stats: {
 			detected: 0,
 			matched: 0,
 			unmatched: 0,
 			suppressed: 0,
 			nudges: 0,
+			userNudges: 0,
 			nudgeSuppressedDuplicate: 0,
 			nudgeChars: 0,
 		},

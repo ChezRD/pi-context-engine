@@ -30,7 +30,7 @@ export function setStatus(ctx: any, state: RuntimeState): void {
 }
 
 function formatStatusLine(ctxArg: any, state: RuntimeState): string {
-	const status = buildContextStatus(ctxArg ?? { getContextUsage: () => ({ ratio: state.contextPct }) }, state.stats, state.config);
+	const status = buildContextStatus(ctxArg?.getContextUsage ? ctxArg : { getContextUsage: () => ({ ratio: state.contextPct }) }, state.stats, state.config);
 	const hit = hitRatio(state.stats.input, state.stats.cacheRead, state.stats.cacheWrite) ?? 0;
 	const bar = buildProgressBar(hit, 10, state.config.statusBarStyle as any);
 	const hitText = formatRatio(hit);
@@ -109,7 +109,7 @@ export function buildDetailedStatus(pi: any, state: RuntimeState): string {
 
 export function formatPruneSummarizerTrace(state: RuntimeState): string {
 	const impact = state.engine.prune.impact;
-	if (!state.config.diagnostics || !impact?.lastSummarizePrompt) return `${t(state.config, "status.pruneTraceTitle")}\n  ${t(state.config, "status.notCaptured")}`;
+	if (!state.config.diagnostics || !impact?.lastSummarizePrompt) return "";
 	const accepted = impact.lastAcceptedSummaries?.length
 		? impact.lastAcceptedSummaries.map((summary, index) => `  [${index + 1}] ${summary}`).join("\n")
 		: `  ${t(state.config, "status.none")}`;

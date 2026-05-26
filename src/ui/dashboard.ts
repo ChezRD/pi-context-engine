@@ -12,16 +12,16 @@ import type { RuntimeState } from "../runtime-state.ts";
 import { pruneAdjustedSavings, pruneNegativeImpactCost } from "../projection/prune-impact.ts";
 import { pruneMessages } from "../projection/pruner.ts";
 
-function padVisibleRight(str: string, width: number): string {
+export function padVisibleRight(str: string, width: number): string {
 	return str + " ".repeat(Math.max(0, width - visibleWidth(str)));
 }
 
-function formatMoney(value: number, digits = 4): string {
+export function formatMoney(value: number, digits = 4): string {
 	if (!Number.isFinite(value)) return "$0.0000";
 	return value < 0 ? `-$${Math.abs(value).toFixed(digits)}` : `$${value.toFixed(digits)}`;
 }
 
-function formatConfigValue(cfg: RuntimeState["config"], value: string): string {
+export function formatConfigValue(cfg: RuntimeState["config"], value: string): string {
 	const key = `ui.settings.value.${value}`;
 	const label = t(cfg, key);
 	return label === key ? value : label;
@@ -355,18 +355,6 @@ function pendingPruneToolCalls(state: RuntimeState): number {
 	return state.engine.prune.pendingBatches.reduce((sum, batch) => sum + batch.toolCalls.length, 0);
 }
 
-function pruneNextLabel(state: RuntimeState): string {
-	const cfg = state.config;
-	if (!cfg.pruneEnabled) return t(cfg, "status.pruneNext.off");
-	if (cfg.pruneOn === "every-turn") return pendingPruneToolCalls(state) > 0 ? t(cfg, "status.pruneNext.now") : t(cfg, "status.pruneNext.toolBatch");
-	if (cfg.pruneOn === "checkpoint") return t(cfg, "status.pruneNext.checkpoint");
-	if (cfg.pruneOn === "on-demand") return t(cfg, "status.pruneNext.manual");
-	const target = Math.max(1, cfg.pruneBatchSize);
-	const current = Math.min(state.engine.prune.batchStepCounter, target);
-	if (cfg.pruneOn === "agent-message" && state.engine.prune.awaitingAgentMessage && pendingPruneToolCalls(state) > 0) return t(cfg, "status.pruneNext.agentMessage");
-	return current >= target ? t(cfg, "status.pruneNext.now") : `${current}/${target}`;
-}
-
 function buildPruneLines(state: RuntimeState, theme: any): string[] {
 	const cfg = state.config;
 	const verbosity = cfg.dashboardVerbosity ?? "normal";
@@ -457,7 +445,7 @@ function buildHitMissBar(ratio: number, width: number, theme: any): string {
 	return theme.fg("success", "█".repeat(filled)) + theme.fg("warning", "░".repeat(empty));
 }
 
-function allocateSlots(
+export function allocateSlots(
 	items: Array<{ value: number }>,
 	total: number,
 	width: number,

@@ -1,8 +1,20 @@
 import type { ExtensionConfig } from "../config.ts";
+import { DEFAULT_DEEPSEEK_MODEL } from "../config.ts";
 import type { RuntimeState } from "../runtime-state.ts";
 import type { ContextEnginePin, FoldBoundary, PinnedSkill, FoldResult } from "../types.ts";
+import type { UserIntentDetection } from "../cache-engine/tool-intent.ts";
+import { tArrayMerged, getActiveLocale } from "../i18n/index.ts";
 
 const SESSION_INTENT_MAX_CHARS = 900;
+const DEADLOCK_MIN_REFUSALS = 3;
+const USER_INTENT_BLOCK_RE = /(?:\[pi-context-engine user intent\]|<!-- pi-context-engine: user intent -->)([\s\S]*?)(?:\[\/pi-context-engine user intent\]|<!-- \/pi-context-engine: user intent -->)/g;
+const TOOL_INTENT_BLOCK_RE = /(?:\[pi-context-engine intent nudge\]|<!-- pi-context-engine: intent nudge -->)([\s\S]*?)(?:\[\/pi-context-engine intent nudge\]|<!-- \/pi-context-engine: intent nudge -->)/g;
+const GUIDANCE_BLOCK_RE = /(?:\[pi-context-engine guidance\]|<!-- pi-context-engine: guidance -->)([\s\S]*?)(?:\[\/pi-context-engine guidance\]|<!-- \/pi-context-engine: guidance -->)/g;
+const FOLD_GUIDANCE_BLOCK_RE = /(?:\[pi-context-engine fold guidance\]|<!-- pi-context-engine: fold guidance -->)([\s\S]*?)(?:\[\/pi-context-engine fold guidance\]|<!-- \/pi-context-engine: fold guidance -->)/g;
+const CUSTOM_TYPE_USER_INTENT = "context-engine-user-intent";
+const CUSTOM_TYPE_TOOL_INTENT = "context-engine-tool-intent";
+const CUSTOM_TYPE_FOLD_GUIDANCE = "context-engine-fold-guidance";
+const CUSTOM_TYPE_GUIDANCE = "context-engine-guidance";
 
 function foldFailure(reasonKey: string): FoldResult {
 	return { ok: false, reasonKey };
@@ -210,6 +222,85 @@ export function extractSessionIntent(messages: any[], maxChars = SESSION_INTENT_
 /**
  * Build synthetic assistant message with fold marker + summary + preserved pins + constraints.
  */
+function extractToolCallSignatures(msg: any): string[] {
+	const sigs: string[] = [];
+	if (Array.isArray(msg?.tool_calls)) {
+		for (const tc of msg.tool_calls) {
+			const name = tc?.function?.name ?? tc?.name;
+			const args = tc?.function?.arguments ?? tc?.arguments;
+			if (name) {
+				const argsStr = typeof args === "object" ? JSON.stringify(args) : String(args ?? "");
+				sigs.push(`${name}:${argsStr}`);
+			}
+		}
+	}
+	if (Array.isArray(msg?.content)) {
+		for (const part of msg.content) {
+			if (part?.type === "toolCall" || part?.type === "tool_use") {
+				const name = part?.name;
+				const args = part?.arguments ?? part?.input;
+				if (name) {
+					const argsStr = typeof args === "object" ? JSON.stringify(args) : String(args ?? "");
+					sigs.push(`${name}:${argsStr}`);
+				}
+			}
+		}
+	}
+	return sigs;
+}
+
+export function detectGoalDeadlock(headMessages: any[], locale?: string): boolean {
+	const sigCounts = new Map<string, number>();
+	const textCounts = new Map<string, number>();
+	let refusalCount = 0;
+
+	const patterns = tArrayMerged("engine.deadlockPatterns", locale ?? "en");
+
+	for (const msg of headMessages) {
+		if (msg?.role === "user") {
+			sigCounts.clear();
+			textCounts.clear();
+			refusalCount = 0;
+			continue;
+		}
+		if (msg?.role === "assistant") {
+			// 1. Check tool call signatures
+			const sigs = extractToolCallSignatures(msg);
+			for (const sig of sigs) {
+				const count = (sigCounts.get(sig) ?? 0) + 1;
+				sigCounts.set(sig, count);
+				if (count >= 3) return true;
+			}
+
+			// 2. Check assistant text repetitions
+			const text = textContent(msg?.content);
+			if (text) {
+				const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
+				if (normalized) {
+					const count = (textCounts.get(normalized) ?? 0) + 1;
+					textCounts.set(normalized, count);
+					if (count >= 3) return true;
+				}
+
+				// 3. Check explicit refusal pattern matches
+				let isRefusal = false;
+				const lower = text.toLowerCase();
+				for (const pattern of patterns) {
+					if (lower.includes(pattern.toLowerCase())) {
+						isRefusal = true;
+						break;
+					}
+				}
+				if (isRefusal) {
+					refusalCount++;
+					if (refusalCount >= DEADLOCK_MIN_REFUSALS) return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
 export function buildFoldMessage(
 	marker: string,
 	summary: string,
@@ -217,13 +308,24 @@ export function buildFoldMessage(
 	constraints: string[],
 	enginePins?: ContextEnginePin[],
 	sessionIntent?: string,
+	effectiveGuidance?: string,
+	deadlock?: boolean,
 ): any {
 	const parts: string[] = [];
 	parts.push(`${marker}\n${summary}`);
+	parts.push("\n\n[This fold summary was written by context engine harness — not by the assistant.]");
 
-	if (sessionIntent?.trim()) {
+	if (deadlock) {
+		parts.push("\n\n[DEADLOCK DETECTED — previous goal attempt is stuck. Do NOT continue pursuing it.]");
+		parts.push("\n[Respond to user explaining the situation and ask them to delete or modify the goal.]");
+	} else if (sessionIntent?.trim()) {
 		parts.push("\n\n[Session intent — preserved across fold:]");
 		parts.push(`\n${sessionIntent.trim()}`);
+	}
+
+	if (effectiveGuidance?.trim()) {
+		parts.push("\n\n[Context Engine operating guidance — preserved across fold:]");
+		parts.push(`\n${effectiveGuidance.trim()}`);
 	}
 
 	// Engine-owned pins first (higher authority)
@@ -250,10 +352,67 @@ export function buildFoldMessage(
 	}
 
 	return {
-		role: "assistant",
-		content: parts.join(""),
+		role: "user",
+		content: [{ type: "text", text: parts.join("") }],
 		reasoning_content: "",
 	};
+}
+
+export function buildEffectiveFoldGuidance(userIntent?: UserIntentDetection): string {
+	const lines = [
+		"Continue applying context-engine behavior after this fold.",
+		"For analysis/audit tasks: classify evidence before claims; separate proven facts, weak signals, and unknowns.",
+		"Do not make definitive coverage/status/absence claims from grep/name scans, filtered output, sliced logs, or partial reads.",
+		"Use structured tool calls for required data; do not claim a tool result unless an actual tool result is present.",
+		"When a tool result says it is partial or has remaining segments, fetch the needed segments before full-file or exhaustive claims.",
+	];
+	if (userIntent && userIntent.kind !== "general") {
+		const matched = userIntent.matchedAction ?? userIntent.toolName;
+		lines.unshift(`Current detected user intent: ${userIntent.kind} (${userIntent.reasonCode}${matched ? `; matched=${matched}` : ""}).`);
+	}
+	return lines.join("\n");
+}
+
+export function extractEffectiveNudgeGuidance(messages: any[], userIntent?: UserIntentDetection): string {
+	const observed = new Set<string>();
+	for (const msg of messages) {
+		const text = textContent(msg?.content);
+		if (!text) continue;
+		for (const block of text.matchAll(USER_INTENT_BLOCK_RE)) {
+			const body = block[1] ?? "";
+			const intent = /^intent:\s*(.+)$/im.exec(body)?.[1]?.trim();
+			const reason = /^reason:\s*(.+)$/im.exec(body)?.[1]?.trim();
+			const matched = /^matched_signal:\s*(.+)$/im.exec(body)?.[1]?.trim();
+			observed.add(`Observed prior user-intent nudge: ${intent ?? "unknown"}${reason ? ` (${reason})` : ""}${matched ? `; matched=${matched}` : ""}.`);
+		}
+		for (const block of text.matchAll(TOOL_INTENT_BLOCK_RE)) {
+			const body = block[1] ?? "";
+			const detected = /Detected pending tool intent:\s*([^\n.]+)/i.exec(body)?.[1]?.trim();
+			observed.add(`Observed prior tool-intent nudge: ${detected ?? "pending tool intent"}.`);
+		}
+		for (const block of text.matchAll(GUIDANCE_BLOCK_RE)) {
+			const body = block[1]?.trim();
+			if (body) observed.add(`Observed prior context-engine guidance; preserve and keep applying detect-intention rules.`);
+		}
+		for (const block of text.matchAll(FOLD_GUIDANCE_BLOCK_RE)) {
+			const body = block[1]?.trim();
+			if (body) observed.add(`Observed prior fold guidance; keep applying it.`);
+		}
+	}
+	return [...observed, buildEffectiveFoldGuidance(userIntent)].join("\n");
+}
+
+function messageFromEntry(entry: any): any | undefined {
+	if (entry?.message) return entry.message;
+	const customType = entry?.customType;
+	const dataContent = typeof entry?.data?.content === "string" ? entry.data.content : undefined;
+	const directContent = typeof entry?.content === "string" ? entry.content : undefined;
+	const content = dataContent ?? directContent;
+	if (!content) return undefined;
+	if (customType === CUSTOM_TYPE_USER_INTENT || customType === CUSTOM_TYPE_TOOL_INTENT || customType === CUSTOM_TYPE_FOLD_GUIDANCE || customType === CUSTOM_TYPE_GUIDANCE || customType === "context-engine-summary") {
+		return { role: "custom", customType, content, display: false };
+	}
+	return undefined;
 }
 
 /**
@@ -280,7 +439,7 @@ export async function summarizeHead(
 	headMessages: any[],
 	opts: { model?: string; timeoutMs?: number; signal?: AbortSignal },
 ): Promise<string> {
-	const model = opts.model ?? "deepseek/deepseek-v4-flash";
+	const model = opts.model ?? DEFAULT_DEEPSEEK_MODEL;
 	const timeoutMs = opts.timeoutMs ?? 15_000;
 	const abortSignal = opts.signal;
 
@@ -360,7 +519,7 @@ export async function semanticFold(
 		return foldFailure("engine.fold.reason.noSessionEntries");
 	}
 
-	const messages = entries.map((e: any) => e.message).filter(Boolean);
+	const messages = entries.map(messageFromEntry).filter(Boolean);
 
 	// 1. Trim trailing tool calls
 	const [trimmedMessages, removed] = trimTrailingAssistantToolCalls(messages);
@@ -388,6 +547,10 @@ export async function semanticFold(
 	const constraints = extractPinnedConstraints(boundary.headMessages);
 	const enginePins = extractContextEnginePins(boundary.headMessages);
 	const sessionIntent = extractSessionIntent(boundary.headMessages);
+	const effectiveGuidance = extractEffectiveNudgeGuidance(trimmedMessages, state.engine.toolIntent?.lastUserIntent);
+
+	// Detect deadlock: model stuck in refusal loop (repeated "I will not", "stuck", "infinite loop" etc.)
+	const deadlock = detectGoalDeadlock(boundary.headMessages, getActiveLocale());
 
 	// 4. Summarize head
 	const systemPrompt = ctx?.model?.systemPrompt ?? ctx?.config?.systemPrompt ?? "";
@@ -408,7 +571,9 @@ export async function semanticFold(
 		skills,
 		constraints,
 		enginePins,
-		sessionIntent,
+		deadlock ? undefined : sessionIntent,
+		deadlock ? undefined : effectiveGuidance,
+		deadlock,
 	);
 
 	// 6. Persist fold state

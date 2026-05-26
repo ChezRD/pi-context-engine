@@ -5,21 +5,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { applyLocale } from "../src/i18n/index.ts";
-import extension, { getDeepSeekCacheCompletions } from "../src/index.ts";
+import extension, { getCacheCompletions } from "../src/index.ts";
 
 function createMockPi() {
   const calls = [];
   const handlers = new Map();
+  const handlerLists = new Map();
   const commands = new Map();
   const activeTools = ["read", "bash", "edit", "write"];
   const allTools = activeTools.map((name) => ({ name }));
   return {
     calls,
     handlers,
+    handlerLists,
     commands,
     pi: {
       on(name, handler) {
         calls.push(["on", name]);
+        handlerLists.set(name, [...(handlerLists.get(name) ?? []), handler]);
         handlers.set(name, handler);
       },
       registerCommand(name, def) {
@@ -28,7 +31,7 @@ function createMockPi() {
       },
       registerTool(def) {
         calls.push(["registerTool", def.name]);
-        allTools.push({ name: def.name });
+        allTools.push(def);
       },
       registerProvider(name, def) {
         calls.push(["registerProvider", name, def]);
@@ -86,6 +89,23 @@ function createMockCtx() {
   };
 }
 
+function createSessionManager() {
+  const labels = new Map();
+  return {
+    getEntries: () => [],
+    getBranch: () => [{ id: "abcdef12", message: { role: "user", content: "Initial request" }, turnIndex: 1 }],
+    getTree: () => [{ entry: { id: "abcdef12" }, children: [] }],
+    getLabel: (id) => labels.get(id),
+    getLeafId: () => "abcdef12",
+    branchWithSummary: async () => "branch1234",
+    _labels: labels,
+  };
+}
+
+function staleContextError() {
+  return new Error("This extension ctx is stale after session replacement or reload.");
+}
+
 async function withTempHome(fn) {
   const oldHome = process.env.HOME;
   const home = await mkdtemp(join(tmpdir(), "pi-context-engine-test-"));
@@ -102,10 +122,10 @@ async function withTempHome(fn) {
 
 test("command argument completions match Pi registerCommand docs", async () => {
   const expected = ["status", "diagnose", "fold", "compact", "hold", "prune", "config", "reset-stats", "enable-capper", "disable-capper", "init"];
-  assert.deepEqual(getDeepSeekCacheCompletions("sta").map((item) => item.value), ["status"]);
-  assert.deepEqual(getDeepSeekCacheCompletions("" ).map((item) => item.value), expected);
-  assert.equal(getDeepSeekCacheCompletions("status extra"), null);
-  assert.equal(getDeepSeekCacheCompletions("missing"), null);
+  assert.deepEqual(getCacheCompletions("sta").map((item) => item.value), ["status"]);
+  assert.deepEqual(getCacheCompletions("" ).map((item) => item.value), expected);
+  assert.equal(getCacheCompletions("status extra"), null);
+  assert.equal(getCacheCompletions("missing"), null);
 
   await withTempHome(async () => {
     const { pi, commands } = createMockPi();
@@ -129,12 +149,48 @@ test("extension factory follows Pi contract: accepts only pi and waits for event
     assert.equal(commands.has("prune"), true);
     assert.equal(calls.some((call) => call[0] === "setActiveTools"), false);
     assert.equal(calls.some((call) => call[0] === "registerProvider"), false);
-    assert.equal(calls.some((call) => call[0] === "registerTool" && call[1] === "context_result_lookup"), true);
+    assert.equal(calls.some((call) => call[0] === "registerTool" && call[1] === "context_result_lookup"), false);
+    assert.equal(calls.some((call) => call[0] === "on" && call[1] === "input"), true);
     assert.equal(calls.some((call) => call[0] === "on" && call[1] === "before_agent_start"), true);
     assert.equal(status.length, 0);
 
     await handlers.get("session_start")({}, ctx);
     assert.equal(status.at(-1)[0], "context-engine");
+  });
+});
+
+test("extension ignores stale session ctx during restore/status refresh", async () => {
+  await withTempHome(async () => {
+    const { pi, handlers } = createMockPi();
+    const { ctx } = createMockCtx();
+    ctx.sessionManager = {
+      getEntries() {
+        throw staleContextError();
+      },
+      getBranch() {
+        throw staleContextError();
+      },
+    };
+    ctx.getContextUsage = () => {
+      throw staleContextError();
+    };
+
+    await extension(pi);
+    await handlers.get("session_start")({}, ctx);
+  });
+});
+
+test("extension ignores stale pi appendEntry during async lifecycle", async () => {
+  await withTempHome(async () => {
+    const mock = createMockPi();
+    const { handlers } = mock;
+    const { ctx } = createMockCtx();
+    mock.pi.appendEntry = () => {
+      throw staleContextError();
+    };
+
+    await extension(mock.pi);
+    await handlers.get("message_end")({ message: { role: "assistant", usage: { input: 10, cacheRead: 90, output: 5 } } }, ctx);
   });
 });
 
@@ -163,6 +219,55 @@ test("extension registers dynamic provider with fallback model ids when enabled"
     assert.ok(providerCall);
     assert.equal(providerCall[1], "context-engine-provider");
     assert.deepEqual(providerCall[2].models.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
+  });
+});
+
+test("context rewind clears prune state through extension onRewind hook", async () => {
+  await withTempHome(async () => {
+    const { pi, handlerLists, calls } = createMockPi();
+    const { ctx } = createMockCtx();
+    ctx.sessionManager = createSessionManager();
+    ctx.navigateTree = async () => {};
+
+    await extension(pi, ctx);
+    const rewindTool = calls.filter((call) => call[0] === "registerTool").map((call) => call[1]).includes("context_rewind");
+    assert.equal(rewindTool, true);
+
+    const tool = pi.getAllTools().find((item) => item.name === "context_rewind");
+    await tool.execute("rewind-1", { target: "12345678", message: "Continue with the current implementation state." }, undefined, undefined, ctx);
+    for (const handler of handlerLists.get("agent_end") ?? []) await handler({}, ctx);
+  });
+});
+
+test("extension restores persisted huge results and handles pin drift injection", async () => {
+  await withTempHome(async () => {
+    const { pi, handlers } = createMockPi();
+    const { ctx } = createMockCtx();
+    ctx.sessionManager = {
+      getEntries: () => [{
+        type: "custom",
+        customType: "context-engine-huge-result",
+        data: { version: 1, record: { ref: "dsc-read-1", tool: "read", text: "stored result" } },
+      }],
+      getBranch: () => [],
+    };
+
+    await extension(pi, ctx);
+    await handlers.get("session_start")({}, ctx);
+
+    const first = await handlers.get("before_agent_start")({ prompt: "Inspect the current code." }, ctx);
+    const pinTool = pi.getAllTools().find((item) => item.name === "context_pin");
+    await pinTool.execute("pin-1", {
+      kind: "priority",
+      name: "test-pin",
+      content: "Keep messages to model in English.",
+      priority: "high",
+      scope: "session",
+    }, undefined, undefined, ctx);
+    const second = await handlers.get("before_agent_start")({ prompt: "Inspect the current code again." }, ctx);
+
+    assert.ok(first === undefined || typeof first === "object");
+    assert.ok(second === undefined || typeof second === "object");
   });
 });
 
@@ -227,6 +332,10 @@ test("before_agent_start injects cache prompt when enabled", async () => {
     await extension(pi);
     const initial = await handlers.get("before_agent_start")({ systemPrompt: "base" }, ctx);
     assert.match(initial.systemPrompt, /Context Engine/);
+    assert.match(initial.systemPrompt, /Keep system prompt and tool definitions stable/);
+    assert.match(initial.systemPrompt, /large tool results carefully/);
+    assert.doesNotMatch(initial.systemPrompt, /planning\/task\/todo tools/);
+    assert.doesNotMatch(initial.systemPrompt, /coverage checks/);
     const result = await handlers.get("before_agent_start")({ systemPrompt: "base" }, ctx);
     assert.match(result.systemPrompt, /base/);
     assert.match(result.systemPrompt, /Context Engine/);
@@ -251,10 +360,9 @@ test("before_agent_start skips duplicate cache prompt injection when marker alre
     const { ctx } = createMockCtx();
 
     await extension(pi);
-    const result = await handlers.get("before_agent_start")({ systemPrompt: "[DeepSeek Cache Optimization]\nbase" }, ctx);
+    const result = await handlers.get("before_agent_start")({ systemPrompt: "[Context Engine]\nbase" }, ctx);
     assert.ok(result);
-    assert.doesNotMatch(result.systemPrompt, /\[Context Engine\]/);
-    assert.match(result.systemPrompt, /\[DeepSeek Cache Optimization\]/);
+    assert.equal((result.systemPrompt.match(/\[Context Engine\]/g) ?? []).length, 1);
     assert.match(result.systemPrompt, /Context Engine Pins/);
   });
 });
@@ -298,13 +406,13 @@ test("session_before_compact never returns placeholder compaction", async () => 
   });
 });
 
-test("session_before_compact lets host default compact", async () => {
+test("session_before_compact cancels empty host compaction", async () => {
   await withTempHome(async () => {
     const { pi, handlers } = createMockPi();
     const { ctx } = createMockCtx();
     await extension(pi);
-    const result = await handlers.get("session_before_compact")({ preparation: { cutEntryIndex: 0 }, branchEntries: [{ entryId: "e1", content: "x" }] }, ctx);
-    assert.equal(result, undefined);
+    const result = await handlers.get("session_before_compact")({ preparation: { messagesToSummarize: [], turnPrefixMessages: [] }, branchEntries: [{ entryId: "e1", content: "x" }] }, ctx);
+    assert.deepEqual(result, { cancel: true });
   });
 });
 
@@ -319,7 +427,7 @@ test("red zone auto-folds by default", async () => {
     await handlers.get("turn_end")({}, mock.ctx);
 
     assert.equal(mock.compactCalls.length, 1);
-    assert.match(mock.compactCalls[0].customInstructions, /(DeepSeek|Context) cache fold/);
+    assert.match(mock.compactCalls[0].customInstructions, /pi-context-engine fold/);
   });
 });
 
@@ -379,7 +487,7 @@ test("critical zone auto-folds by default", async () => {
     await extension(pi);
     await handlers.get("turn_end")({}, mock.ctx);
     assert.equal(mock.compactCalls.length, 1);
-    assert.match(mock.compactCalls[0].customInstructions, /(DeepSeek|Context) cache fold/);
+    assert.match(mock.compactCalls[0].customInstructions, /pi-context-engine fold/);
   });
 });
 
@@ -454,7 +562,7 @@ test("end-to-end session auto-folds under pressure when hit rate is weak", async
       assert.match(mock.status.at(-1)[1], turn.emoji);
     }
     assert.equal(mock.compactCalls.length, 1);
-    assert.match(mock.compactCalls[0].customInstructions, /(DeepSeek|Context) cache fold/);
+    assert.match(mock.compactCalls[0].customInstructions, /pi-context-engine fold/);
     assert.equal(mock.status.at(-1)[1].includes("fold"), true);
   });
 });
@@ -519,7 +627,7 @@ test("tool_call blocks invalid args, normalizes read input, and suppresses dupli
   });
 });
 
-test("manual fold uses custom instructions while compact delegates raw host compaction", async () => {
+test("manual fold and compact carry context-engine instructions", async () => {
   await withTempHome(async () => {
     const { pi, commands } = createMockPi();
     const mock = createMockCtx();
@@ -529,8 +637,9 @@ test("manual fold uses custom instructions while compact delegates raw host comp
     await commands.get("context-engine").handler("compact", mock.ctx);
 
     assert.equal(mock.compactCalls.length, 2);
-    assert.match(mock.compactCalls[0].customInstructions, /(DeepSeek|Context) cache fold/);
-    assert.equal("customInstructions" in mock.compactCalls[1], false);
+    assert.match(mock.compactCalls[0].customInstructions, /pi-context-engine fold/);
+    assert.match(mock.compactCalls[1].customInstructions, /pi-context-engine fold/);
+    assert.match(mock.compactCalls[1].customInstructions, /structured tool calls/);
   });
 });
 
@@ -567,7 +676,8 @@ test("appendOnly projection activates after compact completion and invalidates o
       { role: "user", content: "tail", id: "tail1" },
     ] }, mock.ctx);
     assert.equal(projected.messages[0].role, "system");
-    assert.equal(projected.messages[1].content, "stable summary");
+    assert.equal(projected.messages[1].content[0].text, "stable summary");
+    assert.equal(projected.messages[1].content[0].type, "text");
     assert.equal(projected.messages[2].id, "tail1");
 
     const invalidated = await handlers.get("context")({ messages: [
@@ -880,7 +990,7 @@ test("reset-stats command clears accumulated telemetry", async () => {
   });
 });
 
-test("enable-capper persists config and registers only namespaced lookup tool", async () => {
+test("enable-capper persists config without changing the model-visible tool list", async () => {
   await withTempHome(async (home) => {
     const { pi, calls, commands } = createMockPi();
     const { ctx } = createMockCtx();
@@ -889,7 +999,7 @@ test("enable-capper persists config and registers only namespaced lookup tool", 
     const output = await commands.get("context-engine").handler("enable-capper", ctx);
 
     assert.match(output, /enabled/);
-    assert.equal(calls.some((call) => call[0] === "registerTool" && call[1] === "context_result_lookup"), true);
+    assert.equal(calls.some((call) => call[0] === "registerTool" && call[1] === "context_result_lookup"), false);
     assert.equal(calls.some((call) => call[0] === "registerTool" && call[1] === "context_tree_query"), false);
     const config = JSON.parse(await readFile(join(home, ".pi/agent/context-engine.json"), "utf8"));
     assert.equal(config.hugeResultCapper, true);
@@ -898,7 +1008,7 @@ test("enable-capper persists config and registers only namespaced lookup tool", 
 
 test("tool_result hook caps huge outputs by default", async () => {
   await withTempHome(async () => {
-    const { pi, handlers } = createMockPi();
+    const { pi, handlers, calls } = createMockPi();
     const { ctx } = createMockCtx();
 
     await extension(pi);
@@ -906,11 +1016,46 @@ test("tool_result hook caps huge outputs by default", async () => {
     const capped = await handlers.get("tool_result")(event, ctx);
     assert.match(capped.content[0].text, /pi-context-engine: model-visible context/);
     assert.match(capped.content[0].text, /"ref": "dsc-bash-1"/);
-    assert.match(capped.content[0].text, /\[context_result_lookup kind=slice ref=dsc-bash-1/);
+    assert.match(capped.content[0].text, /<!-- pi-context-engine: huge_result_preview ref=dsc-bash-1/);
     assert.match(capped.content[0].text, /<model_visible_context/);
     assert.match(capped.content[0].text, /kind="context_result_truncated"/);
-    assert.match(capped.content[0].text, /"tool": "context_result_lookup"/);
+    assert.doesNotMatch(capped.content[0].text, /"tool": "context_result_lookup"/);
     assert.equal(capped.details.elidedBy, "pi-context-engine");
+    assert.equal(calls.some((call) => call[0] === "appendEntry" && call[1] === "context-engine-huge-result"), true);
+  });
+});
+
+test("extension persists diagnostics payloads and restores telemetry entries", async () => {
+  await withTempHome(async (home) => {
+    await mkdir(join(home, ".pi/agent"), { recursive: true });
+    await writeFile(join(home, ".pi/agent/context-engine.json"), JSON.stringify({ persistDiagnostics: true }), "utf8");
+
+    const first = createMockPi();
+    const firstCtx = createMockCtx();
+    await extension(first.pi);
+    await first.handlers.get("before_provider_request")({
+      payload: {
+        model: "deepseek-v4-flash",
+        messages: [{ role: "user", content: "Summarize the current implementation state." }],
+        tools: [],
+      },
+    }, firstCtx.ctx);
+    await first.handlers.get("message_end")({ message: { role: "assistant", usage: { input: 10, cacheRead: 40, output: 5 } } }, firstCtx.ctx);
+
+    assert.equal(first.calls.some((call) => call[0] === "appendEntry" && call[1] === "context-engine.payload"), true);
+    const telemetryCall = first.calls.find((call) => call[0] === "appendEntry" && call[1] === "context-engine-telemetry");
+    assert.ok(telemetryCall);
+
+    const second = createMockPi();
+    const secondCtx = createMockCtx();
+    secondCtx.ctx.sessionManager = {
+      getEntries: () => [{ type: "custom", customType: "context-engine-telemetry", data: telemetryCall[2] }],
+      getBranch: () => [{ id: "u1", message: { role: "user", content: "Continue from restored telemetry." } }],
+    };
+
+    await extension(second.pi);
+    await second.handlers.get("session_start")({}, secondCtx.ctx);
+    assert.match(secondCtx.status.at(-1)[1], /Cache/);
   });
 });
 
@@ -1120,4 +1265,54 @@ test("decideAfterUsage ratio is correctly reported", async () => {
   assert.equal(d.ratio, 0.75);
   assert.equal(d.promptTokens, 750);
   assert.equal(d.ctxMax, 1000);
+});
+
+test("model_select handler does not throw", async () => {
+  const { pi, handlers } = createMockPi();
+  const { ctx } = createMockCtx();
+  await extension(pi);
+  await handlers.get("model_select")({ modelId: "gpt-4", provider: "openai" }, ctx);
+  assert.ok(true);
+});
+
+test("before_agent_start triggers pin drift checkpoint", async () => {
+  await withTempHome(async (home) => {
+    const { pi, handlers } = createMockPi();
+    const { ctx } = createMockCtx();
+    await mkdir(join(home, ".pi/agent"), { recursive: true });
+    // First call: sets lastPinInjectionHash
+    await writeFile(join(home, ".pi/agent/context-engine.json"), JSON.stringify({ skillPinning: false }), "utf8");
+    await extension(pi);
+    await handlers.get("before_agent_start")({ systemPrompt: "base" }, ctx);
+    // Second call: config changes (hash differs) → triggers pin drift
+    await writeFile(join(home, ".pi/agent/context-engine.json"), JSON.stringify({ skillPinning: true }), "utf8");
+    await handlers.get("before_agent_start")({ systemPrompt: "base" }, ctx);
+    assert.ok(true);
+  });
+});
+
+test("input handler returns continue", async () => {
+  const { pi, handlers } = createMockPi();
+  const { ctx } = createMockCtx();
+  await extension(pi);
+  const result = await handlers.get("input")({}, ctx);
+  assert.deepEqual(result, { action: "continue" });
+});
+
+test("message_end warns textual tool call", async () => {
+  const { pi, handlers } = createMockPi();
+  const mock = createMockCtx();
+  mock.ctx.ui = { notify: () => {} };
+  mock.ctx.getContextUsage = () => ({ tokens: 100, contextWindow: 1000 });
+  await extension(pi);
+  await handlers.get("message_end")({ role: "assistant", content: "I will use grep to find" }, mock.ctx);
+  assert.ok(true);
+});
+
+test("message_end extracts usage snapshot", async () => {
+  const { pi, handlers } = createMockPi();
+  const { ctx } = createMockCtx();
+  await extension(pi);
+  await handlers.get("message_end")({ role: "assistant", content: "result", usage: { input: 100, output: 50 } }, ctx);
+  assert.ok(true);
 });

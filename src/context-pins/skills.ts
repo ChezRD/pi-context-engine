@@ -59,7 +59,6 @@ export function parseFrontmatter(content: string): { frontmatter: Record<string,
 }
 
 function scanSkillRoot(root: string): SkillInfo[] {
-	if (!existsSync(root)) return [];
 	let entries: string[];
 	try {
 		entries = readdirSync(root);

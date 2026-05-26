@@ -151,6 +151,7 @@ export interface DeepSeekDetection {
 
 export interface PayloadDiagnostics {
 	createdAt: number;
+	requestIndex?: number;
 	messageCount: number;
 	toolCount: number;
 	payloadBytes: number;
@@ -160,6 +161,12 @@ export interface PayloadDiagnostics {
 	promptCacheKey?: boolean;
 	assistantMessages: number;
 	assistantMissingReasoningContent: number;
+	assistantToolCallMessages?: number;
+	toolResultMessages?: number;
+	lastMessageRole?: string;
+	lastMessageHasToolCalls?: boolean;
+	lastMessageToolCallId?: string;
+	tailRoles?: string[];
 }
 
 export interface PrunerStatus {
@@ -377,6 +384,7 @@ export interface CacheEngineState {
 	currentSegmentId?: string;
 	lastProviderModelId?: string;
 	lastProviderPrefixHash?: string;
+	providerRequestCount?: number;
 	pendingUsageModelId?: string;
 	pendingUsageProvider?: string;
 	semanticFold: SemanticFoldState;

@@ -108,7 +108,7 @@ describe("pruneMessages", () => {
 			{ role: "tool", toolCallId: "tc-2", content: "large result 2" },
 		], idx);
 		assert.equal(pruned.length, 1);
-		assert.equal(pruned[0].role, "assistant");
+		assert.equal(pruned[0].role, "custom");
 	});
 
 	it("keeps contiguous assistant call sites while dropping summarized tool results", () => {
@@ -124,8 +124,10 @@ describe("pruneMessages", () => {
 		], idx);
 		assert.equal(pruned.length, 3);
 		assert.equal(pruned[0].role, "user");
-		assert.equal(pruned[1].role, "assistant");
-		assert.deepEqual(pruned[1].content, [{ type: "text", text: "summary one\n\nsummary two" }]);
+		assert.equal(pruned[1].role, "custom");
+		assert.match(pruned[1].content[0].text, /<context-engine-summary>/);
+		assert.match(pruned[1].content[0].text, /Summary of pruned tool-call batch/);
+		assert.match(pruned[1].content[0].text, /summary one\n\nsummary two/);
 		assert.equal(pruned[2].content, "дальше правлю");
 	});
 
@@ -140,7 +142,7 @@ describe("pruneMessages", () => {
 			{ role: "assistant", content: "дальше правлю" },
 		], idx);
 		assert.equal(pruned.length, 4);
-		assert.equal(pruned[1].role, "assistant");
+		assert.equal(pruned[1].role, "custom");
 		assert.equal(pruned[2].content, "пока отмечу гипотезу");
 		assert.equal(pruned[3].content, "дальше правлю");
 	});
@@ -169,7 +171,7 @@ describe("messagesFromBranch", () => {
 describe("summarizeToolBatch", () => {
 	it("normalizes capped model-visible tool results before sending them to the summarizer", () => {
 		const normalized = normalizeToolResultForSummary([
-			"[pi-context-engine: model-visible context]",
+			"<!-- pi-context-engine: model-visible context -->",
 			"<model_visible_context schema=\"pi.model_visible_context.v1\" kind=\"context_result_truncated\" ui=\"custom-rendered\">",
 			"<payload name=\"lookup\">",
 			"[context_result_lookup kind=slice ref=dsc-read-1 offset=0 limit=10 range=0:10 returned_chars=10 total_chars=10 bytes=10 has_more=false]",
@@ -185,7 +187,7 @@ describe("summarizeToolBatch", () => {
 
 	it("falls back to preview text when model-visible lookup payload contains only the lookup header", () => {
 		const normalized = normalizeToolResultForSummary([
-			"[pi-context-engine: model-visible context]",
+			"<!-- pi-context-engine: model-visible context -->",
 			"<model_visible_context schema=\"pi.model_visible_context.v1\" kind=\"context_result_truncated\" ui=\"custom-rendered\">",
 			"<payload name=\"lookup\">",
 			"[context_result_lookup kind=slice ref=dsc-read-2 offset=0 limit=10 range=0:10 returned_chars=10 total_chars=10 bytes=10 has_more=false]",
@@ -349,7 +351,7 @@ describe("summarizeToolBatch", () => {
 					id: "t1",
 					name: "read",
 					result: [
-						"[pi-context-engine: model-visible context]",
+						"<!-- pi-context-engine: model-visible context -->",
 						"<model_visible_context schema=\"pi.model_visible_context.v1\" kind=\"context_result_truncated\" ui=\"custom-rendered\">",
 						"<payload name=\"lookup\">",
 						"[context_result_lookup kind=slice ref=dsc-read-1 offset=0 limit=10 range=0:10 returned_chars=10 total_chars=10 bytes=10 has_more=false]",
@@ -749,7 +751,7 @@ describe("captureBatches context", () => {
 					content: [{
 						type: "text",
 						text: [
-							"[pi-context-engine: model-visible context]",
+							"<!-- pi-context-engine: model-visible context -->",
 							"<model_visible_context schema=\"pi.model_visible_context.v1\" kind=\"context_result_truncated\" ui=\"custom-rendered\">",
 							"<payload name=\"lookup\">",
 							"[context_result_lookup kind=slice ref=dsc-read-7 offset=0 limit=10 range=0:10 returned_chars=10 total_chars=10 bytes=10 has_more=false]",
@@ -764,7 +766,7 @@ describe("captureBatches context", () => {
 
 		captureBatches(branch, [], pruneState, 3);
 		assert.equal(pruneState.pendingBatches.length, 1);
-	assert.match(pruneState.pendingBatches[0].toolCalls[0].result ?? "", /^\[pi-context-engine: model-visible context\]/);
+	assert.match(pruneState.pendingBatches[0].toolCalls[0].result ?? "", /^<!-- pi-context-engine: model-visible context -->/);
 	assert.doesNotMatch(pruneState.pendingBatches[0].toolCalls[0].result ?? "", /^\[\{/);
 	});
 });

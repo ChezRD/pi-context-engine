@@ -1,4 +1,4 @@
-export const MODEL_VISIBLE_CONTEXT_MARKER = "[pi-context-engine: model-visible context]";
+export const MODEL_VISIBLE_CONTEXT_MARKER = "<!-- pi-context-engine: model-visible context -->";
 export const MODEL_VISIBLE_CONTEXT_SCHEMA = "pi.model_visible_context.v1";
 
 export interface ModelVisibleSection {

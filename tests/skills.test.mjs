@@ -1,6 +1,6 @@
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -38,6 +38,13 @@ Skill body here`;
 		const result = parseFrontmatter(content);
 		assert.deepEqual(result.frontmatter, {});
 		assert.equal(result.body, "Body only");
+	});
+
+	it("treats unterminated frontmatter as body", () => {
+		const content = "---\nname: partial\nBody";
+		const result = parseFrontmatter(content);
+		assert.deepEqual(result.frontmatter, { name: "partial" });
+		assert.equal(result.body, content);
 	});
 });
 
@@ -90,5 +97,74 @@ description: Another one
 
 	it("findSkill returns undefined for unknown", () => {
 		assert.equal(findSkill("nope", tmpDir), undefined);
+	});
+
+	it("ignores unreadable or invalid skill entries", () => {
+		const invalidRoot = mkdtempSync(join(tmpdir(), "pin-invalid-"));
+		mkdirSync(join(invalidRoot, ".pi"), { recursive: true });
+		writeFileSync(join(invalidRoot, ".pi", "skills"), "not a directory");
+		assert.equal(discoverSkills(invalidRoot).some((skill) => skill.name === "not a directory"), false);
+
+		const mixedRoot = mkdtempSync(join(tmpdir(), "pin-mixed-"));
+		const skillsDir = join(mixedRoot, ".pi", "skills");
+		mkdirSync(skillsDir, { recursive: true });
+		symlinkSync(join(mixedRoot, "missing-target"), join(skillsDir, "broken-skill"));
+		mkdirSync(join(skillsDir, "directory-skill", "SKILL.md"), { recursive: true });
+		mkdirSync(join(skillsDir, "valid-skill"), { recursive: true });
+		writeFileSync(join(skillsDir, "valid-skill", "SKILL.md"), "# Valid\n\nBody");
+
+		const skills = discoverSkills(mixedRoot);
+		assert.ok(skills.some((skill) => skill.name === "valid-skill"));
+		assert.equal(skills.some((skill) => skill.name === "broken-skill"), false);
+		assert.equal(skills.some((skill) => skill.name === "directory-skill"), false);
+	});
+
+	it("skips non-directory entries and directories without SKILL.md", () => {
+		const root = mkdtempSync(join(tmpdir(), "pin-scan-"));
+		const skillsDir = join(root, ".pi", "skills");
+		mkdirSync(skillsDir, { recursive: true });
+		// Regular file in skills dir — statSync succeeds, isDirectory returns false
+		writeFileSync(join(skillsDir, "readme.txt"), "just a file");
+		// Directory without SKILL.md — existsSync returns false
+		mkdirSync(join(skillsDir, "no-skill-file"), { recursive: true });
+		// Valid skill
+		mkdirSync(join(skillsDir, "valid-skill"), { recursive: true });
+		writeFileSync(join(skillsDir, "valid-skill", "SKILL.md"), `---
+name: valid-skill
+description: A valid skill
+---
+Body`);
+
+		const skills = discoverSkills(root);
+		assert.equal(skills.some(s => s.name === "valid-skill"), true);
+		assert.equal(skills.some(s => s.name === "readme.txt"), false);
+		assert.equal(skills.some(s => s.name === "no-skill-file"), false);
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	it("skips dot entries, node_modules, and prefers project skills over later roots", () => {
+		const root = mkdtempSync(join(tmpdir(), "pin-priority-"));
+		const skillsDir = join(root, ".pi", "skills");
+		mkdirSync(join(skillsDir, ".hidden"), { recursive: true });
+		writeFileSync(join(skillsDir, ".hidden", "SKILL.md"), "# Hidden");
+		mkdirSync(join(skillsDir, "node_modules"), { recursive: true });
+		writeFileSync(join(skillsDir, "node_modules", "SKILL.md"), "# Node");
+		mkdirSync(join(skillsDir, "fallback-name"), { recursive: true });
+		writeFileSync(join(skillsDir, "fallback-name", "SKILL.md"), `---
+description: No explicit name
+---
+Body`);
+
+		const skills = discoverSkills(root);
+		assert.ok(skills.some((skill) => skill.name === "fallback-name"));
+		assert.equal(skills.some((skill) => skill.name === ".hidden"), false);
+		assert.equal(skills.some((skill) => skill.name === "node_modules"), false);
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	it("handles non-existent project directory", () => {
+		const skills = discoverSkills("/nonexistent-project-fallback");
+		// Should not throw; non-existent project just means no project-local skills
+		assert.ok(Array.isArray(skills));
 	});
 });

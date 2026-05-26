@@ -1,4 +1,5 @@
 import type { ContextEnginePin, PinnedContextKind } from "../types.ts";
+import { safeAppendEntry } from "../stale-context.ts";
 
 const CUSTOM_TYPE = "context-engine-pin";
 const MAX_CONTENT_CHARS = 4096;
@@ -178,8 +179,7 @@ export class PinStore {
  * Persist a pin record via pi.appendEntry.
  */
 export function persistPinEntry(pi: any, record: PinnedContextRecord): void {
-	if (typeof pi?.appendEntry !== "function") return;
-	pi.appendEntry(CUSTOM_TYPE, {
+	safeAppendEntry(pi, CUSTOM_TYPE, {
 		version: 1,
 		record,
 	});
