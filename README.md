@@ -20,13 +20,13 @@ This extension is for:
 ## Installation
 
 ```bash
-pi install npm:pi-context-engine
+pi install git:github.com/ChezRD/pi-context-engine
 ```
 
 Try without installing:
 
 ```bash
-pi -e npm:pi-context-engine
+pi -e git:github.com/ChezRD/pi-context-engine
 ```
 
 ## Quick start
